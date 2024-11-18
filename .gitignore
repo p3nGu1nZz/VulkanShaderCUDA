@@ -1,0 +1,96 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+ENV/
+.venv/
+.ENV/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# macOS system files
+.DS_Store
+
+# Windows system files
+Thumbs.db
+Desktop.ini
+
+# Python specific
+*.pyo
+*.pyd
+
+# Logs and local debugging files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Temporary files
+*.bak
+*.orig
+*.save
+
+# Compiled C extensions
+*.so
+
+# Unit test / coverage reports
+htmlcov/
+.coverage
+.tox/
+.cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# PyInstaller
+# Usually contains the word "build" or "dist" within it
+build/
+dist/
+
+# Packaging
+*.egg-info/
+.eggs/
+*.manifest
+*.spec
+
+# C extensions
+*.dll
+*.dylib
+*.exe
+
+# Distribution / Wheel packages
+*.egg
+*.whl
+
+# Documentation artifacts
+docs/_build/
+
+# PyCharm IDE
+.idea/
+*.iml
+
+# VS Code settings
+.vscode/
+
+# GitHub Actions
+.github/
+
+# Custom settings or config files
+*.ini
+*.cfg
+*.toml
+
+# Environment variable files
+.env
+.env.*
+
+# Archive files
+*.zip
+*.tar.gz
+*.rar

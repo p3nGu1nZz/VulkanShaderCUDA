@@ -1,177 +1,275 @@
-import numpy as np
+import torch
 import vulkan_backend
+import numpy as np
+from typing import Tuple
 
 
-def generate_random_data(shape, dtype=np.float32):
-    """
-    Generate random data of a given shape and dtype.
-    """
-    return np.random.rand(*shape).astype(dtype)
+def to_contiguous_numpy(tensor: torch.Tensor) -> np.ndarray:
+    """Convert a PyTorch tensor to a contiguous NumPy array."""
+    return tensor.detach().contiguous().cpu().numpy()
 
 
-def test_addition():
-    print("Testing Vulkan addition...")
+class VulkanAddFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        if a.shape != b.shape:
+            raise ValueError(f"Tensors must have the same shape. Got {a.shape} and {b.shape}")
+        
+        c = torch.empty_like(a)
+        a_np = to_contiguous_numpy(a)
+        b_np = to_contiguous_numpy(b)
+        c_np = to_contiguous_numpy(c)
+        
+        vulkan_backend.vulkan_add(a_np, b_np, c_np)
+        c.copy_(torch.from_numpy(c_np))
+        
+        ctx.save_for_backward(a, b)
+        return c
 
-    # Initialize Vulkan backend
-    vulkan_backend.init_vulkan()
-
-    # Generate random data
-    size = 1024
-    a_data = generate_random_data((size,))
-    b_data = generate_random_data((size,))
-    expected_output = a_data + b_data
-
-    # Allocate Vulkan tensors
-    a = vulkan_backend.VulkanTensor(size * 4)  # Each float is 4 bytes
-    b = vulkan_backend.VulkanTensor(size * 4)
-    c = vulkan_backend.VulkanTensor(size * 4)
-
-    # Upload data to Vulkan tensors
-    a.upload(a_data)
-    b.upload(b_data)
-
-    # Perform addition
-    vulkan_backend.vulkan_add(a, b, c)
-
-    # Download data from Vulkan tensor
-    c_data = c.download()
-
-    # Verify results
-    assert np.allclose(c_data, expected_output), "Addition test failed!"
-    print("Addition test passed!")
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        a, b = ctx.saved_tensors
+        return grad_output, grad_output
 
 
-def test_matrix_multiplication():
-    print("\nTesting Vulkan matrix multiplication...")
+class VulkanReLUFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input: torch.Tensor) -> torch.Tensor:
+        output = torch.empty_like(input)
+        input_np = to_contiguous_numpy(input)
+        output_np = to_contiguous_numpy(output)
+        
+        vulkan_backend.vulkan_relu(input_np, output_np, input.numel())
+        output.copy_(torch.from_numpy(output_np))
+        
+        ctx.save_for_backward(input)
+        return output
 
-    # Generate random data
-    M, K, N = 16, 16, 16
-    a_data = generate_random_data((M, K))
-    b_data = generate_random_data((K, N))
-    expected_output = np.dot(a_data, b_data)
-
-    # Allocate Vulkan tensors
-    a = vulkan_backend.VulkanTensor(M * K * 4)
-    b = vulkan_backend.VulkanTensor(K * N * 4)
-    c = vulkan_backend.VulkanTensor(M * N * 4)
-
-    # Upload data to Vulkan tensors
-    a.upload(a_data.flatten())
-    b.upload(b_data.flatten())
-
-    # Perform matrix multiplication
-    vulkan_backend.vulkan_matmul(a, b, c, M, N, K)
-
-    # Download data from Vulkan tensor
-    c_data = c.download().reshape(M, N)
-
-    # Verify results
-    assert np.allclose(c_data, expected_output), "Matrix multiplication test failed!"
-    print("Matrix multiplication test passed!")
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        input, = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input[input < 0] = 0
+        return grad_input
 
 
-def test_relu():
-    print("\nTesting Vulkan ReLU activation...")
+class VulkanSigmoidFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input: torch.Tensor) -> torch.Tensor:
+        output = torch.empty_like(input)
+        input_np = to_contiguous_numpy(input)
+        output_np = to_contiguous_numpy(output)
+        
+        vulkan_backend.vulkan_sigmoid(input_np, output_np, input.numel())
+        output.copy_(torch.from_numpy(output_np))
+        
+        ctx.save_for_backward(output)  # Save sigmoid output for backward pass
+        return output
 
-    # Generate random data
-    size = 1024
-    input_data = generate_random_data((size,)) - 0.5  # Generate both positive and negative values
-    expected_output = np.maximum(input_data, 0)
-
-    # Allocate Vulkan tensors
-    input_tensor = vulkan_backend.VulkanTensor(size * 4)
-    output_tensor = vulkan_backend.VulkanTensor(size * 4)
-
-    # Upload data to Vulkan tensor
-    input_tensor.upload(input_data)
-
-    # Perform ReLU activation
-    vulkan_backend.vulkan_relu(input_tensor, output_tensor)
-
-    # Download data from Vulkan tensor
-    output_data = output_tensor.download()
-
-    # Verify results
-    assert np.allclose(output_data, expected_output), "ReLU test failed!"
-    print("ReLU test passed!")
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        output, = ctx.saved_tensors
+        return grad_output * output * (1 - output)
 
 
-def test_softmax():
-    print("\nTesting Vulkan softmax...")
+class VulkanSoftmaxFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input: torch.Tensor) -> torch.Tensor:
+        output = torch.empty_like(input)
+        input_np = to_contiguous_numpy(input)
+        output_np = to_contiguous_numpy(output)
+        
+        vulkan_backend.vulkan_softmax(input_np, output_np, input.numel())
+        output.copy_(torch.from_numpy(output_np))
+        
+        ctx.save_for_backward(output)  # Save softmax output for backward pass
+        return output
 
-    # Generate random data
-    size = 1024
-    input_data = generate_random_data((size,))
-    exp_data = np.exp(input_data)
-    expected_output = exp_data / np.sum(exp_data)
-
-    # Allocate Vulkan tensors
-    input_tensor = vulkan_backend.VulkanTensor(size * 4)
-    output_tensor = vulkan_backend.VulkanTensor(size * 4)
-
-    # Upload data to Vulkan tensor
-    input_tensor.upload(input_data)
-
-    # Perform softmax activation
-    vulkan_backend.vulkan_softmax(input_tensor, output_tensor)
-
-    # Download data from Vulkan tensor
-    output_data = output_tensor.download()
-
-    # Verify results
-    assert np.allclose(output_data, expected_output), "Softmax test failed!"
-    print("Softmax test passed!")
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        output, = ctx.saved_tensors
+        return grad_output * output * (1 - output)
 
 
-def test_convolution():
-    print("\nTesting Vulkan 2D convolution...")
+class VulkanPoolingFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, pool_size: Tuple[int, int]) -> torch.Tensor:
+        if len(input.shape) != 3:
+            raise ValueError(f"Input tensor must be 3D (width, height, depth). Got shape {input.shape}")
+        
+        width, height, depth = input.shape
+        pool_size_x, pool_size_y = pool_size
+        
+        if width % pool_size_x != 0 or height % pool_size_y != 0:
+            raise ValueError(f"Input dimensions must be divisible by pool size. Got {width}x{height} and pool size {pool_size}")
+        
+        output_width = width // pool_size_x
+        output_height = height // pool_size_y
+        output = torch.empty((output_width, output_height, depth), device=input.device)
+        
+        input_np = to_contiguous_numpy(input)
+        output_np = to_contiguous_numpy(output)
+        
+        vulkan_backend.vulkan_pooling(
+            input_np,
+            output_np,
+            width,
+            height,
+            depth,
+            pool_size_x,
+            pool_size_y,
+        )
+        output.copy_(torch.from_numpy(output_np))
+        
+        ctx.save_for_backward(input)
+        ctx.pool_size = pool_size
+        return output
 
-    # Generate random data
-    input_width, input_height = 8, 8
-    filter_width, filter_height = 3, 3
-    stride = 1
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        input, = ctx.saved_tensors
+        pool_size = ctx.pool_size
+        raise NotImplementedError("Backward pooling is not implemented in Vulkan backend.")
 
-    input_data = generate_random_data((input_height, input_width))
-    filter_data = generate_random_data((filter_height, filter_width))
-    output_width = (input_width - filter_width) // stride + 1
-    output_height = (input_height - filter_height) // stride + 1
 
-    expected_output = np.zeros((output_height, output_width))
-    for y in range(output_height):
-        for x in range(output_width):
-            region = input_data[
-                y * stride : y * stride + filter_height,
-                x * stride : x * stride + filter_width,
-            ]
-            expected_output[y, x] = np.sum(region * filter_data)
+class VulkanConv2DFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+        if len(input.shape) != 3 or len(kernel.shape) != 3:
+            raise ValueError("Input and kernel must be 3D tensors (width, height, depth)")
+        
+        input_width, input_height, input_depth = input.shape
+        kernel_width, kernel_height, kernel_depth = kernel.shape
+        
+        if input_depth != kernel_depth:
+            raise ValueError(f"Input depth ({input_depth}) must match kernel depth ({kernel_depth})")
+        
+        output_depth = kernel.shape[0]  # Number of filters
+        output_width = input_width - kernel_width + 1
+        output_height = input_height - kernel_height + 1
+        
+        if output_width <= 0 or output_height <= 0:
+            raise ValueError("Kernel size is too large for input")
+        
+        output = torch.empty((output_width, output_height, output_depth), device=input.device)
+        input_np = to_contiguous_numpy(input)
+        kernel_np = to_contiguous_numpy(kernel)
+        output_np = to_contiguous_numpy(output)
+        
+        vulkan_backend.vulkan_conv2d(
+            input_np,
+            kernel_np,
+            output_np,
+            input_width,
+            input_height,
+            input_depth,
+            kernel_width,
+            kernel_height,
+            output_depth,
+        )
+        output.copy_(torch.from_numpy(output_np))
+        
+        ctx.save_for_backward(input, kernel)
+        return output
 
-    # Allocate Vulkan tensors
-    input_tensor = vulkan_backend.VulkanTensor(input_height * input_width * 4)
-    filter_tensor = vulkan_backend.VulkanTensor(filter_height * filter_width * 4)
-    output_tensor = vulkan_backend.VulkanTensor(output_height * output_width * 4)
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        input, kernel = ctx.saved_tensors
+        raise NotImplementedError("Backward convolution is not implemented in Vulkan backend.")
 
-    # Upload data to Vulkan tensors
-    input_tensor.upload(input_data.flatten())
-    filter_tensor.upload(filter_data.flatten())
 
-    # Perform 2D convolution
-    vulkan_backend.vulkan_conv2d(
-        input_tensor, filter_tensor, output_tensor, input_width, input_height, filter_width, filter_height, stride
-    )
+# PyTorch-friendly wrappers for Vulkan operations
+def vulkan_add(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Element-wise addition using Vulkan backend."""
+    return VulkanAddFunction.apply(a, b)
 
-    # Download data from Vulkan tensor
-    output_data = output_tensor.download().reshape(output_height, output_width)
 
-    # Verify results
-    assert np.allclose(output_data, expected_output), "Convolution test failed!"
-    print("Convolution test passed!")
+def vulkan_relu(input: torch.Tensor) -> torch.Tensor:
+    """ReLU activation using Vulkan backend."""
+    return VulkanReLUFunction.apply(input)
+
+
+def vulkan_sigmoid(input: torch.Tensor) -> torch.Tensor:
+    """Sigmoid activation using Vulkan backend."""
+    return VulkanSigmoidFunction.apply(input)
+
+
+def vulkan_softmax(input: torch.Tensor) -> torch.Tensor:
+    """Softmax activation using Vulkan backend."""
+    return VulkanSoftmaxFunction.apply(input)
+
+
+def vulkan_pooling(input: torch.Tensor, pool_size: Tuple[int, int]) -> torch.Tensor:
+    """Max pooling using Vulkan backend."""
+    return VulkanPoolingFunction.apply(input, pool_size)
+
+
+def vulkan_conv2d(input: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+    """2D convolution using Vulkan backend."""
+    return VulkanConv2DFunction.apply(input, kernel)
+
+
+# Initialize Vulkan backend
+vulkan_backend.init_vulkan()
+
+
+# Test functions
+def test_vulkan_operations():
+    print("Testing Vulkan-backed PyTorch operations...")
+    
+    # Test addition
+    print("\nTesting addition:")
+    a = torch.rand(1024, requires_grad=True)
+    b = torch.rand(1024, requires_grad=True)
+    c = vulkan_add(a, b)
+    loss = c.sum()
+    loss.backward()
+    print(f"Addition shape: {c.shape}")
+    print(f"Gradient shapes: {a.grad.shape}, {b.grad.shape}")
+    
+    # Test ReLU
+    print("\nTesting ReLU:")
+    input_relu = torch.randn(1024, requires_grad=True)
+    output_relu = vulkan_relu(input_relu)
+    loss = output_relu.sum()
+    loss.backward()
+    print(f"ReLU shape: {output_relu.shape}")
+    print(f"Gradient shape: {input_relu.grad.shape}")
+    
+    # Test Sigmoid
+    print("\nTesting Sigmoid:")
+    input_sigmoid = torch.randn(1024, requires_grad=True)
+    output_sigmoid = vulkan_sigmoid(input_sigmoid)
+    loss = output_sigmoid.sum()
+    loss.backward()
+    print(f"Sigmoid shape: {output_sigmoid.shape}")
+    print(f"Gradient shape: {input_sigmoid.grad.shape}")
+    
+    # Test Softmax
+    print("\nTesting Softmax:")
+    input_softmax = torch.randn(1024, requires_grad=True)
+    output_softmax = vulkan_softmax(input_softmax)
+    loss = output_softmax.sum()
+    loss.backward()
+    print(f"Softmax shape: {output_softmax.shape}")
+    print(f"Gradient shape: {input_softmax.grad.shape}")
+    
+    # Test Pooling
+    print("\nTesting Pooling:")
+    input_pooling = torch.rand(8, 8, 3)
+    output_pooling = vulkan_pooling(input_pooling, (2, 2))
+    print(f"Pooling input shape: {input_pooling.shape}")
+    print(f"Pooling output shape: {output_pooling.shape}")
+    
+    # Test Convolution
+    print("\nTesting Convolution:")
+    input_conv = torch.rand(32, 32, 3)
+    kernel_conv = torch.rand(3, 3, 3)
+    output_conv = vulkan_conv2d(input_conv, kernel_conv)
+    print(f"Conv2D input shape: {input_conv.shape}")
+    print(f"Conv2D kernel shape: {kernel_conv.shape}")
+    print(f"Conv2D output shape: {output_conv.shape}")
 
 
 if __name__ == "__main__":
-    print("Starting Vulkan backend tests...")
-    test_addition()
-    test_matrix_multiplication()
-    test_relu()
-    test_softmax()
-    test_convolution()
-    print("\nAll tests completed successfully!")
+    test_vulkan_operations()

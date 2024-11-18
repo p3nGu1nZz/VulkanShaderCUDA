@@ -2,8 +2,8 @@
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
-layout(binding = 0) buffer Input { float input[]; };
-layout(binding = 1) buffer Output { float output[]; };
+layout(binding = 0) buffer InputBuffer { float inputBuffer[]; };
+layout(binding = 1) buffer OutputBuffer { float outputBuffer[]; };
 
 layout(push_constant) uniform PoolingParams {
     uint inputWidth;
@@ -29,14 +29,14 @@ void main() {
             uint inputIdx = inputY * params.inputWidth + inputX;
 
             if (params.isMaxPool == 1) {
-                poolValue = max(poolValue, input[inputIdx]);
+                poolValue = max(poolValue, inputBuffer[inputIdx]);
             } else {
-                poolValue += input[inputIdx];
+                poolValue += inputBuffer[inputIdx];
                 count++;
             }
         }
     }
 
     uint outputIdx = gl_GlobalInvocationID.y * (params.inputWidth / params.stride) + gl_GlobalInvocationID.x;
-    output[outputIdx] = params.isMaxPool == 1 ? poolValue : poolValue / count;
+    outputBuffer[outputIdx] = params.isMaxPool == 1 ? poolValue : poolValue / count;
 }

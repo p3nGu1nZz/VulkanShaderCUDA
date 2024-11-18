@@ -2,9 +2,9 @@
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
-layout(binding = 0) buffer Input { float input[]; };
-layout(binding = 1) buffer Weights { float weights[]; };
-layout(binding = 2) buffer Output { float output[]; };
+layout(binding = 0) buffer InputBuffer { float inputBuffer[]; };
+layout(binding = 1) buffer WeightBuffer { float weightBuffer[]; };
+layout(binding = 2) buffer OutputBuffer { float outputBuffer[]; };
 
 layout(push_constant) uniform Conv2DParams {
     uint inputWidth;
@@ -29,10 +29,10 @@ void main() {
             uint inputIdx = inputY * params.inputWidth + inputX;
             uint weightIdx = filterY * params.filterWidth + filterX;
 
-            sum += input[inputIdx] * weights[weightIdx];
+            sum += inputBuffer[inputIdx] * weightBuffer[weightIdx];
         }
     }
 
     uint outputIdx = gl_GlobalInvocationID.y * params.inputWidth + gl_GlobalInvocationID.x;
-    output[outputIdx] = sum;
+    outputBuffer[outputIdx] = sum;
 }

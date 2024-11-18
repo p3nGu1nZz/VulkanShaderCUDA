@@ -1,0 +1,11 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputBuffer { float inputBuffer[]; };
+layout(binding = 1) buffer OutputBuffer { float outputBuffer[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    outputBuffer[idx] = 1.0 / (1.0 + exp(-inputBuffer[idx]));
+}

@@ -1,0 +1,36 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputBuffer { float inputBuffer[]; };
+layout(binding = 1) buffer OutputBuffer { float outputBuffer[]; };
+
+layout(push_constant) uniform SoftmaxParams {
+    uint length;
+} params;
+
+shared float sharedSum[256]; // Shared memory for local workgroup
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint localIdx = gl_LocalInvocationID.x;
+
+    // Exponentiation
+    float expValue = exp(inputBuffer[idx]);
+
+    // Compute shared sum (within workgroup)
+    sharedSum[localIdx] = expValue;
+    barrier();
+
+    if (localIdx == 0) {
+        float sum = 0.0;
+        for (uint i = 0; i < 256; ++i) {
+            sum += sharedSum[i];
+        }
+        sharedSum[0] = sum; // Store total sum in shared memory
+    }
+    barrier();
+
+    // Normalize
+    outputBuffer[idx] = expValue / sharedSum[0];
+}
