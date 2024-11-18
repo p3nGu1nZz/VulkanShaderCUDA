@@ -1,42 +1,49 @@
+// pool.comp
+// pooling.comp
 #version 450
-
 layout(local_size_x = 16, local_size_y = 16) in;
 
-layout(binding = 0) buffer InputBuffer { float inputBuffer[]; };
-layout(binding = 1) buffer OutputBuffer { float outputBuffer[]; };
+layout(binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
 
-layout(push_constant) uniform PoolingParams {
-    uint inputWidth;
-    uint inputHeight;
-    uint poolWidth;
-    uint poolHeight;
-    uint stride;
-    uint isMaxPool; // 1 for Max Pooling, 0 for Avg Pooling
+layout(binding = 1) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform constants {
+    uint width;
+    uint height;
+    uint channels;
+    uint poolSize;
 } params;
 
 void main() {
-    uint x = gl_GlobalInvocationID.x * params.stride;
-    uint y = gl_GlobalInvocationID.y * params.stride;
-
-    float poolValue = params.isMaxPool == 1 ? -1e9 : 0.0;
-    uint count = 0;
-
-    for (uint i = 0; i < params.poolHeight; ++i) {
-        for (uint j = 0; j < params.poolWidth; ++j) {
-            uint inputX = x + j;
-            uint inputY = y + i;
-
-            uint inputIdx = inputY * params.inputWidth + inputX;
-
-            if (params.isMaxPool == 1) {
-                poolValue = max(poolValue, inputBuffer[inputIdx]);
-            } else {
-                poolValue += inputBuffer[inputIdx];
-                count++;
+    uint outX = gl_GlobalInvocationID.x;
+    uint outY = gl_GlobalInvocationID.y;
+    uint channel = gl_GlobalInvocationID.z;
+    
+    if (outX >= params.width/params.poolSize || 
+        outY >= params.height/params.poolSize || 
+        channel >= params.channels) {
+        return;
+    }
+    
+    float maxValue = -3.402823466e+38;
+    
+    // Iterate over pooling window
+    for (uint py = 0; py < params.poolSize; py++) {
+        for (uint px = 0; px < params.poolSize; px++) {
+            uint inX = outX * params.poolSize + px;
+            uint inY = outY * params.poolSize + py;
+            
+            if (inX < params.width && inY < params.height) {
+                uint inIdx = (inY * params.width + inX) * params.channels + channel;
+                maxValue = max(maxValue, input_buf.data[inIdx]);
             }
         }
     }
-
-    uint outputIdx = gl_GlobalInvocationID.y * (params.inputWidth / params.stride) + gl_GlobalInvocationID.x;
-    outputBuffer[outputIdx] = params.isMaxPool == 1 ? poolValue : poolValue / count;
+    
+    uint outIdx = (outY * (params.width/params.poolSize) + outX) * params.channels + channel;
+    output_buf.data[outIdx] = maxValue;
 }

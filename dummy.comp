@@ -1,0 +1,312 @@
+// add.comp
+#version 450
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA {
+    float data[];
+} inputA;
+
+layout(binding = 1) buffer InputB {
+    float data[];
+} inputB;
+
+layout(binding = 2) buffer Output {
+    float data[];
+} outputC;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    outputC.data[idx] = inputA.data[idx] + inputB.data[idx];
+}
+
+// conv2d.comp
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
+
+layout(binding = 1) readonly buffer Kernel {
+    float data[];
+} kernel_buf;
+
+layout(binding = 2) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform constants {
+    uint inputWidth;
+    uint inputHeight;
+    uint inputChannels;
+    uint outputChannels;
+    uint kernelSize;
+} params;
+
+void main() {
+    uint outX = gl_GlobalInvocationID.x;
+    uint outY = gl_GlobalInvocationID.y;
+    uint outChannel = gl_GlobalInvocationID.z;
+
+    uint outputWidth = params.inputWidth - params.kernelSize + 1;
+    uint outputHeight = params.inputHeight - params.kernelSize + 1;
+
+    if (outX >= outputWidth || outY >= outputHeight || outChannel >= params.outputChannels) {
+        return;
+    }
+
+    float sum = 0.0;
+    
+    for (uint ic = 0; ic < params.inputChannels; ic++) {
+        for (uint ky = 0; ky < params.kernelSize; ky++) {
+            for (uint kx = 0; kx < params.kernelSize; kx++) {
+                uint inX = outX + kx;
+                uint inY = outY + ky;
+                
+                uint inIdx = (inY * params.inputWidth + inX) * params.inputChannels + ic;
+                uint kernelIdx = ((outChannel * params.inputChannels + ic) * params.kernelSize + ky) * params.kernelSize + kx;
+                
+                sum += input_buf.data[inIdx] * kernel_buf.data[kernelIdx];
+            }
+        }
+    }
+    
+    uint outIdx = (outY * outputWidth + outX) * params.outputChannels + outChannel;
+    output_buf.data[outIdx] = sum;
+}
+
+// pool.comp
+// pooling.comp
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
+
+layout(binding = 1) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform constants {
+    uint width;
+    uint height;
+    uint channels;
+    uint poolSize;
+} params;
+
+void main() {
+    uint outX = gl_GlobalInvocationID.x;
+    uint outY = gl_GlobalInvocationID.y;
+    uint channel = gl_GlobalInvocationID.z;
+    
+    if (outX >= params.width/params.poolSize || 
+        outY >= params.height/params.poolSize || 
+        channel >= params.channels) {
+        return;
+    }
+    
+    float maxValue = -3.402823466e+38;
+    
+    // Iterate over pooling window
+    for (uint py = 0; py < params.poolSize; py++) {
+        for (uint px = 0; px < params.poolSize; px++) {
+            uint inX = outX * params.poolSize + px;
+            uint inY = outY * params.poolSize + py;
+            
+            if (inX < params.width && inY < params.height) {
+                uint inIdx = (inY * params.width + inX) * params.channels + channel;
+                maxValue = max(maxValue, input_buf.data[inIdx]);
+            }
+        }
+    }
+    
+    uint outIdx = (outY * (params.width/params.poolSize) + outX) * params.channels + channel;
+    output_buf.data[outIdx] = maxValue;
+}
+
+// relu.comp
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
+
+layout(binding = 1) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= input_buf.data.length()) return;
+    
+    float val = input_buf.data[idx];
+    output_buf.data[idx] = max(0.0, val);
+}
+
+// sigmoid.comp
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
+
+layout(binding = 1) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= input_buf.data.length()) return;
+    
+    float x = input_buf.data[idx];
+    output_buf.data[idx] = 1.0 / (1.0 + exp(-x));
+}
+
+// softmax.comp
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
+
+layout(binding = 1) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+// Two-pass implementation to avoid atomic operations
+shared float local_max;
+shared float local_sum;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint local_idx = gl_LocalInvocationID.x;
+    
+    // Initialize shared memory
+    if (local_idx == 0) {
+        local_max = -3.402823466e+38;  // FLT_MIN
+        local_sum = 0.0;
+    }
+    barrier();
+    
+    float val = 0.0;
+    if (idx < input_buf.data.length()) {
+        val = input_buf.data[idx];
+    }
+    
+    // First pass: find maximum (reduction within workgroup)
+    float thread_max = val;
+    for (uint stride = gl_WorkGroupSize.x/2; stride > 0; stride >>= 1) {
+        if (local_idx < stride) {
+            thread_max = max(thread_max, thread_max);
+        }
+        barrier();
+    }
+    
+    // Update global maximum
+    if (local_idx == 0) {
+        local_max = thread_max;
+    }
+    barrier();
+    
+    // Calculate exp(x - max) and sum
+    if (idx < input_buf.data.length()) {
+        float exp_val = exp(val - local_max);
+        
+        // Second pass: sum of exponentials (reduction)
+        float thread_sum = exp_val;
+        for (uint stride = gl_WorkGroupSize.x/2; stride > 0; stride >>= 1) {
+            if (local_idx < stride) {
+                thread_sum += thread_sum;
+            }
+            barrier();
+        }
+        
+        if (local_idx == 0) {
+            local_sum = thread_sum;
+        }
+        barrier();
+        
+        // Final normalization
+        output_buf.data[idx] = exp_val / local_sum;
+    }
+}
+
+// matmul.comp
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) buffer InputA {
+    float data[];
+} inputA;
+
+layout(binding = 1) buffer InputB {
+    float data[];
+} inputB;
+
+layout(binding = 2) buffer Output {
+    float data[];
+} outputC;
+
+layout(push_constant) uniform Constants {
+    uint M;  // Height of A
+    uint K;  // Width of A / Height of B
+    uint N;  // Width of B
+} constants;
+
+shared float sharedA[16][16];  // Tile size = 16x16
+shared float sharedB[16][16];
+
+void main() {
+    uint row = gl_GlobalInvocationID.y;
+    uint col = gl_GlobalInvocationID.x;
+    uint localRow = gl_LocalInvocationID.y;
+    uint localCol = gl_LocalInvocationID.x;
+
+    float sum = 0.0;
+    
+    // Number of tiles needed
+    uint numTiles = (constants.K + 15) / 16;
+
+    // Process each tile
+    for (uint tile = 0; tile < numTiles; tile++) {
+        // Load data into shared memory
+        uint tileOffset = tile * 16;
+        
+        // Load A into shared memory
+        if ((row < constants.M) && (tileOffset + localCol < constants.K)) {
+            sharedA[localRow][localCol] = inputA.data[row * constants.K + tileOffset + localCol];
+        } else {
+            sharedA[localRow][localCol] = 0.0;
+        }
+        
+        // Load B into shared memory
+        if ((tileOffset + localRow < constants.K) && (col < constants.N)) {
+            sharedB[localRow][localCol] = inputB.data[(tileOffset + localRow) * constants.N + col];
+        } else {
+            sharedB[localRow][localCol] = 0.0;
+        }
+        
+        // Ensure all threads have loaded their data
+        barrier();
+        
+        // Compute partial dot product for this tile
+        for (uint k = 0; k < 16; k++) {
+            sum += sharedA[localRow][k] * sharedB[k][localCol];
+        }
+        
+        // Ensure all threads are done with shared memory
+        barrier();
+    }
+
+    // Write result
+    if (row < constants.M && col < constants.N) {
+        outputC.data[row * constants.N + col] = sum;
+    }
+}

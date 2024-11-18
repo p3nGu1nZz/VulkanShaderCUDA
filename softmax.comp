@@ -1,36 +1,70 @@
+// softmax.comp
 #version 450
 
 layout(local_size_x = 256) in;
 
-layout(binding = 0) buffer InputBuffer { float inputBuffer[]; };
-layout(binding = 1) buffer OutputBuffer { float outputBuffer[]; };
+layout(binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
 
-layout(push_constant) uniform SoftmaxParams {
-    uint length;
-} params;
+layout(binding = 1) writeonly buffer Output {
+    float data[];
+} output_buf;
 
-shared float sharedSum[256]; // Shared memory for local workgroup
+// Two-pass implementation to avoid atomic operations
+shared float local_max;
+shared float local_sum;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    uint localIdx = gl_LocalInvocationID.x;
-
-    // Exponentiation
-    float expValue = exp(inputBuffer[idx]);
-
-    // Compute shared sum (within workgroup)
-    sharedSum[localIdx] = expValue;
-    barrier();
-
-    if (localIdx == 0) {
-        float sum = 0.0;
-        for (uint i = 0; i < 256; ++i) {
-            sum += sharedSum[i];
-        }
-        sharedSum[0] = sum; // Store total sum in shared memory
+    uint local_idx = gl_LocalInvocationID.x;
+    
+    // Initialize shared memory
+    if (local_idx == 0) {
+        local_max = -3.402823466e+38;  // FLT_MIN
+        local_sum = 0.0;
     }
     barrier();
-
-    // Normalize
-    outputBuffer[idx] = expValue / sharedSum[0];
+    
+    float val = 0.0;
+    if (idx < input_buf.data.length()) {
+        val = input_buf.data[idx];
+    }
+    
+    // First pass: find maximum (reduction within workgroup)
+    float thread_max = val;
+    for (uint stride = gl_WorkGroupSize.x/2; stride > 0; stride >>= 1) {
+        if (local_idx < stride) {
+            thread_max = max(thread_max, thread_max);
+        }
+        barrier();
+    }
+    
+    // Update global maximum
+    if (local_idx == 0) {
+        local_max = thread_max;
+    }
+    barrier();
+    
+    // Calculate exp(x - max) and sum
+    if (idx < input_buf.data.length()) {
+        float exp_val = exp(val - local_max);
+        
+        // Second pass: sum of exponentials (reduction)
+        float thread_sum = exp_val;
+        for (uint stride = gl_WorkGroupSize.x/2; stride > 0; stride >>= 1) {
+            if (local_idx < stride) {
+                thread_sum += thread_sum;
+            }
+            barrier();
+        }
+        
+        if (local_idx == 0) {
+            local_sum = thread_sum;
+        }
+        barrier();
+        
+        // Final normalization
+        output_buf.data[idx] = exp_val / local_sum;
+    }
 }

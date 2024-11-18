@@ -1,38 +1,55 @@
+// conv2d.comp
 #version 450
-
 layout(local_size_x = 16, local_size_y = 16) in;
 
-layout(binding = 0) buffer InputBuffer { float inputBuffer[]; };
-layout(binding = 1) buffer WeightBuffer { float weightBuffer[]; };
-layout(binding = 2) buffer OutputBuffer { float outputBuffer[]; };
+layout(binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
 
-layout(push_constant) uniform Conv2DParams {
+layout(binding = 1) readonly buffer Kernel {
+    float data[];
+} kernel_buf;
+
+layout(binding = 2) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform constants {
     uint inputWidth;
     uint inputHeight;
-    uint filterWidth;
-    uint filterHeight;
-    uint stride;
+    uint inputChannels;
+    uint outputChannels;
+    uint kernelSize;
 } params;
 
 void main() {
-    uint x = gl_GlobalInvocationID.x * params.stride;
-    uint y = gl_GlobalInvocationID.y * params.stride;
-    uint filterX, filterY;
+    uint outX = gl_GlobalInvocationID.x;
+    uint outY = gl_GlobalInvocationID.y;
+    uint outChannel = gl_GlobalInvocationID.z;
 
-    float sum = 0.0;
+    uint outputWidth = params.inputWidth - params.kernelSize + 1;
+    uint outputHeight = params.inputHeight - params.kernelSize + 1;
 
-    for (filterY = 0; filterY < params.filterHeight; ++filterY) {
-        for (filterX = 0; filterX < params.filterWidth; ++filterX) {
-            uint inputX = x + filterX;
-            uint inputY = y + filterY;
-
-            uint inputIdx = inputY * params.inputWidth + inputX;
-            uint weightIdx = filterY * params.filterWidth + filterX;
-
-            sum += inputBuffer[inputIdx] * weightBuffer[weightIdx];
-        }
+    if (outX >= outputWidth || outY >= outputHeight || outChannel >= params.outputChannels) {
+        return;
     }
 
-    uint outputIdx = gl_GlobalInvocationID.y * params.inputWidth + gl_GlobalInvocationID.x;
-    outputBuffer[outputIdx] = sum;
+    float sum = 0.0;
+    
+    for (uint ic = 0; ic < params.inputChannels; ic++) {
+        for (uint ky = 0; ky < params.kernelSize; ky++) {
+            for (uint kx = 0; kx < params.kernelSize; kx++) {
+                uint inX = outX + kx;
+                uint inY = outY + ky;
+                
+                uint inIdx = (inY * params.inputWidth + inX) * params.inputChannels + ic;
+                uint kernelIdx = ((outChannel * params.inputChannels + ic) * params.kernelSize + ky) * params.kernelSize + kx;
+                
+                sum += input_buf.data[inIdx] * kernel_buf.data[kernelIdx];
+            }
+        }
+    }
+    
+    uint outIdx = (outY * outputWidth + outX) * params.outputChannels + outChannel;
+    output_buf.data[outIdx] = sum;
 }

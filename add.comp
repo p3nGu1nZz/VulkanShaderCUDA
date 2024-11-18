@@ -1,6 +1,6 @@
+// add.comp
 #version 450
-
-layout(local_size_x = 16, local_size_y = 16) in;
+layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer InputA {
     float data[];
@@ -10,21 +10,11 @@ layout(binding = 1) buffer InputB {
     float data[];
 } inputB;
 
-layout(binding = 2) buffer OutputC {
+layout(binding = 2) buffer Output {
     float data[];
 } outputC;
 
-layout(push_constant) uniform PushConstants {
-    uint width;
-    uint height;
-} constants;
-
 void main() {
-    uint x = gl_GlobalInvocationID.x;
-    uint y = gl_GlobalInvocationID.y;
-
-    if (x < constants.width && y < constants.height) {
-        uint index = y * constants.width + x;
-        outputC.data[index] = inputA.data[index] + inputB.data[index];
-    }
+    uint idx = gl_GlobalInvocationID.x;
+    outputC.data[idx] = inputA.data[idx] + inputB.data[idx];
 }

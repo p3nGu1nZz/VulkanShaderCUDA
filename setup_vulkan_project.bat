@@ -6,6 +6,9 @@ set PATH=%VULKAN_SDK%\Bin;%VULKAN_SDK%\Lib;%PATH%
 set INCLUDE=%VULKAN_SDK%\Include;%INCLUDE%
 set LIB=%VULKAN_SDK%\Lib;%LIB%
 
+REM Create directories if they don't exist
+if not exist "shaders" mkdir shaders
+
 REM Create a virtual environment
 echo Creating virtual environment...
 python -m venv venv
@@ -24,37 +27,27 @@ if %errorlevel% neq 0 (
     pause
     exit /b 1
 )
+
+REM Install PyTorch and dependencies
 echo Installing PyTorch...
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-REM Install dependencies
 echo Installing dependencies...
 python -m pip install pybind11 numpy
-if %errorlevel% neq 0 (
-    echo Failed to install dependencies!
-    pause
-    exit /b 1
-)
 
 REM Compile GLSL shaders
 echo Compiling GLSL shaders...
 set GLSLANG_VALIDATOR=%VULKAN_SDK%\Bin\glslangValidator.exe
 
-%GLSLANG_VALIDATOR% -V add.comp -o add.spv
-if %errorlevel% neq 0 goto ShaderError
-%GLSLANG_VALIDATOR% -V mul.comp -o mul.spv
-if %errorlevel% neq 0 goto ShaderError
-%GLSLANG_VALIDATOR% -V matmul.comp -o matmul.spv
-if %errorlevel% neq 0 goto ShaderError
-%GLSLANG_VALIDATOR% -V relu.comp -o relu.spv
-if %errorlevel% neq 0 goto ShaderError
-%GLSLANG_VALIDATOR% -V sigmoid.comp -o sigmoid.spv
-if %errorlevel% neq 0 goto ShaderError
-%GLSLANG_VALIDATOR% -V softmax.comp -o softmax.spv
-if %errorlevel% neq 0 goto ShaderError
-%GLSLANG_VALIDATOR% -V conv2d.comp -o conv2d.spv
-if %errorlevel% neq 0 goto ShaderError
-%GLSLANG_VALIDATOR% -V pooling.comp -o pooling.spv
-if %errorlevel% neq 0 goto ShaderError
+REM Compile shaders and place them in the shaders directory
+for %%f in (add.comp mul.comp matmul.comp relu.comp sigmoid.comp softmax.comp conv2d.comp pooling.comp) do (
+    echo Compiling %%f...
+    %GLSLANG_VALIDATOR% -V %%f -o shaders\%%~nf.spv
+    if %errorlevel% neq 0 (
+        echo Failed to compile %%f
+        pause
+        exit /b 1
+    )
+)
 
 echo Shaders compiled successfully!
 pause
@@ -68,22 +61,30 @@ exit /b 1
 :BuildBackend
 REM Build the Vulkan backend
 echo Building Vulkan backend...
-echo from setuptools import setup, Extension > setup.py
-echo from pybind11.setup_helpers import Pybind11Extension >> setup.py
-echo ext_modules = [ >> setup.py
-echo     Pybind11Extension( >> setup.py
-echo         "vulkan_backend", >> setup.py
-echo         ["vulkan_backend.cpp"], >> setup.py
-echo         include_dirs=["%VULKAN_SDK%/Include"], >> setup.py
-echo         library_dirs=["%VULKAN_SDK%/Lib"], >> setup.py
-echo         libraries=["vulkan-1"], >> setup.py
-echo     ) >> setup.py
-echo ] >> setup.py
-echo setup( >> setup.py
-echo     name="vulkan_backend", >> setup.py
-echo     ext_modules=ext_modules, >> setup.py
-echo     zip_safe=False, >> setup.py
-echo ) >> setup.py
+(
+echo from setuptools import setup
+echo from pybind11.setup_helpers import Pybind11Extension
+echo import sys
+echo.
+echo extra_compile_args = ['/std:c++17'] if sys.platform == 'win32' else ['-std=c++17']
+echo.
+echo ext_modules = [
+echo     Pybind11Extension(
+echo         "vulkan_backend",
+echo         ["vulkan_backend.cpp"],
+echo         include_dirs=[r"%VULKAN_SDK%/Include"],
+echo         library_dirs=[r"%VULKAN_SDK%/Lib"],
+echo         libraries=["vulkan-1"],
+echo         extra_compile_args=extra_compile_args,
+echo     ^)
+echo ]
+echo.
+echo setup(
+echo     name="vulkan_backend",
+echo     ext_modules=ext_modules,
+echo     zip_safe=False,
+echo ^)
+) > setup.py
 
 python setup.py build_ext --inplace
 if %errorlevel% neq 0 (
@@ -92,7 +93,6 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 echo Vulkan backend built successfully!
-pause
 
 REM Run tests
 echo Running tests...
