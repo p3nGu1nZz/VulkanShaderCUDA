@@ -1,6 +1,4 @@
-// relu.comp
 #version 450
-
 layout(local_size_x = 256) in;
 
 layout(binding = 0) readonly buffer Input {
@@ -13,8 +11,9 @@ layout(binding = 1) writeonly buffer Output {
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    if (idx >= input_buf.data.length()) return;
-    
+    if (idx >= input_buf.data.length()) {
+        return;
+    }
     float val = input_buf.data[idx];
     output_buf.data[idx] = max(0.0, val);
 }

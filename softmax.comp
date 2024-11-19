@@ -1,5 +1,6 @@
-// softmax.comp
 #version 450
+#extension GL_EXT_shader_atomic_float : enable
+#extension GL_EXT_shader_atomic_float2 : enable
 
 layout(local_size_x = 256) in;
 
@@ -11,60 +12,50 @@ layout(binding = 1) writeonly buffer Output {
     float data[];
 } output_buf;
 
-// Two-pass implementation to avoid atomic operations
-shared float local_max;
-shared float local_sum;
+layout(push_constant) uniform Constants {
+    uint size;
+} params;
+
+shared float shared_max;
+shared float shared_sum;
 
 void main() {
-    uint idx = gl_GlobalInvocationID.x;
-    uint local_idx = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint lid = gl_LocalInvocationID.x;
+    uint local_size = gl_WorkGroupSize.x;
     
     // Initialize shared memory
-    if (local_idx == 0) {
-        local_max = -3.402823466e+38;  // FLT_MIN
-        local_sum = 0.0;
+    if (lid == 0) {
+        shared_max = -3.402823466e+38;  // FLT_MIN
+        shared_sum = 0.0;
     }
     barrier();
     
-    float val = 0.0;
-    if (idx < input_buf.data.length()) {
-        val = input_buf.data[idx];
+    // Step 1: Find maximum value for numerical stability
+    float thread_max = -3.402823466e+38;
+    for (uint i = gid; i < params.size; i += gl_NumWorkGroups.x * local_size) {
+        thread_max = max(thread_max, input_buf.data[i]);
     }
     
-    // First pass: find maximum (reduction within workgroup)
-    float thread_max = val;
-    for (uint stride = gl_WorkGroupSize.x/2; stride > 0; stride >>= 1) {
-        if (local_idx < stride) {
-            thread_max = max(thread_max, thread_max);
-        }
-        barrier();
-    }
-    
-    // Update global maximum
-    if (local_idx == 0) {
-        local_max = thread_max;
-    }
+    // Reduce to find global max
+    atomicMax(shared_max, thread_max);
     barrier();
     
-    // Calculate exp(x - max) and sum
-    if (idx < input_buf.data.length()) {
-        float exp_val = exp(val - local_max);
-        
-        // Second pass: sum of exponentials (reduction)
-        float thread_sum = exp_val;
-        for (uint stride = gl_WorkGroupSize.x/2; stride > 0; stride >>= 1) {
-            if (local_idx < stride) {
-                thread_sum += thread_sum;
-            }
-            barrier();
-        }
-        
-        if (local_idx == 0) {
-            local_sum = thread_sum;
-        }
-        barrier();
-        
-        // Final normalization
-        output_buf.data[idx] = exp_val / local_sum;
+    // Step 2: Compute exp(x - max) and sum
+    float thread_sum = 0.0;
+    for (uint i = gid; i < params.size; i += gl_NumWorkGroups.x * local_size) {
+        float val = exp(input_buf.data[i] - shared_max);
+        thread_sum += val;
+        // Store intermediate exp values
+        output_buf.data[i] = val;
+    }
+    
+    // Reduce to find global sum
+    atomicAdd(shared_sum, thread_sum);
+    barrier();
+    
+    // Step 3: Normalize by sum
+    for (uint i = gid; i < params.size; i += gl_NumWorkGroups.x * local_size) {
+        output_buf.data[i] /= shared_sum;
     }
 }

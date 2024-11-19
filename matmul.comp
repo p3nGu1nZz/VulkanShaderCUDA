@@ -1,4 +1,3 @@
-// matmul.comp
 #version 450
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -18,10 +17,10 @@ layout(push_constant) uniform Constants {
     uint M;  // Height of A
     uint K;  // Width of A / Height of B
     uint N;  // Width of B
-} constants;
+} params;
 
-shared float sharedA[16][16];  // Tile size = 16x16
-shared float sharedB[16][16];
+shared float tileA[16][16];
+shared float tileB[16][16];
 
 void main() {
     uint row = gl_GlobalInvocationID.y;
@@ -30,43 +29,39 @@ void main() {
     uint localCol = gl_LocalInvocationID.x;
 
     float sum = 0.0;
-    
-    // Number of tiles needed
-    uint numTiles = (constants.K + 15) / 16;
 
-    // Process each tile
-    for (uint tile = 0; tile < numTiles; tile++) {
-        // Load data into shared memory
-        uint tileOffset = tile * 16;
-        
-        // Load A into shared memory
-        if ((row < constants.M) && (tileOffset + localCol < constants.K)) {
-            sharedA[localRow][localCol] = inputA.data[row * constants.K + tileOffset + localCol];
+    uint numTiles = (params.K + 15) / 16;
+
+    for (uint t = 0; t < numTiles; t++) {
+        // Load A tile
+        uint aRow = row;
+        uint aCol = t * 16 + localCol;
+        if (aRow < params.M && aCol < params.K) {
+            tileA[localRow][localCol] = inputA.data[aRow * params.K + aCol];
         } else {
-            sharedA[localRow][localCol] = 0.0;
+            tileA[localRow][localCol] = 0.0;
         }
-        
-        // Load B into shared memory
-        if ((tileOffset + localRow < constants.K) && (col < constants.N)) {
-            sharedB[localRow][localCol] = inputB.data[(tileOffset + localRow) * constants.N + col];
+
+        // Load B tile
+        uint bRow = t * 16 + localRow;
+        uint bCol = col;
+        if (bRow < params.K && bCol < params.N) {
+            tileB[localRow][localCol] = inputB.data[bRow * params.N + bCol];
         } else {
-            sharedB[localRow][localCol] = 0.0;
+            tileB[localRow][localCol] = 0.0;
         }
-        
-        // Ensure all threads have loaded their data
+
         barrier();
-        
-        // Compute partial dot product for this tile
+
+        // Compute dot product for this tile
         for (uint k = 0; k < 16; k++) {
-            sum += sharedA[localRow][k] * sharedB[k][localCol];
+            sum += tileA[localRow][k] * tileB[k][localCol];
         }
-        
-        // Ensure all threads are done with shared memory
+
         barrier();
     }
 
-    // Write result
-    if (row < constants.M && col < constants.N) {
-        outputC.data[row * constants.N + col] = sum;
+    if (row < params.M && col < params.N) {
+        outputC.data[row * params.N + col] = sum;
     }
 }

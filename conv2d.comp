@@ -1,55 +1,105 @@
-// conv2d.comp
 #version 450
-layout(local_size_x = 16, local_size_y = 16) in;
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
 
 layout(binding = 0) readonly buffer Input {
     float data[];
 } input_buf;
 
-layout(binding = 1) readonly buffer Kernel {
+layout(binding = 1) readonly buffer Weights {
     float data[];
-} kernel_buf;
+} weight_buf;
 
 layout(binding = 2) writeonly buffer Output {
     float data[];
 } output_buf;
 
-layout(push_constant) uniform constants {
-    uint inputWidth;
-    uint inputHeight;
-    uint inputChannels;
-    uint outputChannels;
-    uint kernelSize;
+layout(push_constant) uniform Constants {
+    uint input_width;
+    uint input_height;
+    uint input_channels;
+    uint output_channels;
+    uint kernel_size;
+    uint batch_size;
+    uint padding;
+    uint stride;
 } params;
 
+shared float input_tile[12][12];    // (8 + 4) x (8 + 4) for 3x3 kernel
+shared float weight_tile[4][9];     // 4 output channels x 9 weights
+
 void main() {
-    uint outX = gl_GlobalInvocationID.x;
-    uint outY = gl_GlobalInvocationID.y;
-    uint outChannel = gl_GlobalInvocationID.z;
-
-    uint outputWidth = params.inputWidth - params.kernelSize + 1;
-    uint outputHeight = params.inputHeight - params.kernelSize + 1;
-
-    if (outX >= outputWidth || outY >= outputHeight || outChannel >= params.outputChannels) {
+    uint output_x = gl_GlobalInvocationID.x;
+    uint output_y = gl_GlobalInvocationID.y;
+    uint output_c = gl_GlobalInvocationID.z;
+    
+    uint local_x = gl_LocalInvocationID.x;
+    uint local_y = gl_LocalInvocationID.y;
+    uint local_z = gl_LocalInvocationID.z;
+    
+    uint output_width = (params.input_width + 2 * params.padding - params.kernel_size) / params.stride + 1;
+    uint output_height = (params.input_height + 2 * params.padding - params.kernel_size) / params.stride + 1;
+    
+    if (output_x >= output_width || output_y >= output_height || output_c >= params.output_channels) {
         return;
     }
-
+    
     float sum = 0.0;
     
-    for (uint ic = 0; ic < params.inputChannels; ic++) {
-        for (uint ky = 0; ky < params.kernelSize; ky++) {
-            for (uint kx = 0; kx < params.kernelSize; kx++) {
-                uint inX = outX + kx;
-                uint inY = outY + ky;
-                
-                uint inIdx = (inY * params.inputWidth + inX) * params.inputChannels + ic;
-                uint kernelIdx = ((outChannel * params.inputChannels + ic) * params.kernelSize + ky) * params.kernelSize + kx;
-                
-                sum += input_buf.data[inIdx] * kernel_buf.data[kernelIdx];
-            }
-        }
+    // Load weights into shared memory
+    if (local_x < params.kernel_size && local_y < params.kernel_size && local_z < 4) {
+        uint weight_idx = output_c * params.input_channels * params.kernel_size * params.kernel_size +
+                         local_y * params.kernel_size + local_x;
+        weight_tile[local_z][local_y * params.kernel_size + local_x] = weight_buf.data[weight_idx];
     }
     
-    uint outIdx = (outY * outputWidth + outX) * params.outputChannels + outChannel;
-    output_buf.data[outIdx] = sum;
+    // For each input channel
+    for (uint ic = 0; ic < params.input_channels; ic++) {
+        barrier();
+        
+        // Load input tile into shared memory
+        uint input_tile_x = local_x;
+        uint input_tile_y = local_y;
+        
+        while (input_tile_y < 12) {
+            while (input_tile_x < 12) {
+                int input_x = int(output_x * params.stride + input_tile_x) - int(params.padding);
+                int input_y = int(output_y * params.stride + input_tile_y) - int(params.padding);
+                
+                float value = 0.0;
+                if (input_x >= 0 && input_x < int(params.input_width) &&
+                    input_y >= 0 && input_y < int(params.input_height)) {
+                    uint input_idx = ic * params.input_height * params.input_width +
+                                   input_y * params.input_width +
+                                   input_x;
+                    value = input_buf.data[input_idx];
+                }
+                
+                input_tile[input_tile_y][input_tile_x] = value;
+                input_tile_x += 8;
+            }
+            input_tile_x = local_x;
+            input_tile_y += 8;
+        }
+        
+        barrier();
+        
+        // Compute convolution for this input channel
+        for (uint ky = 0; ky < params.kernel_size; ky++) {
+            for (uint kx = 0; kx < params.kernel_size; kx++) {
+                uint input_tile_idx_y = local_y + ky;
+                uint input_tile_idx_x = local_x + kx;
+                float input_val = input_tile[input_tile_idx_y][input_tile_idx_x];
+                float weight_val = weight_tile[local_z][ky * params.kernel_size + kx];
+                sum += input_val * weight_val;
+            }
+        }
+        
+        barrier();
+    }
+    
+    // Write output
+    uint output_idx = output_c * output_height * output_width +
+                     output_y * output_width +
+                     output_x;
+    output_buf.data[output_idx] = sum;
 }

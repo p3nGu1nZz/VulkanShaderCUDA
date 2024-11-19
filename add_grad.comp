@@ -1,0 +1,21 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput {
+    float data[];
+} gradOut;
+
+layout(binding = 1) buffer GradA {
+    float data[];
+} gradA;
+
+layout(binding = 2) buffer GradB {
+    float data[];
+} gradB;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    float grad = gradOut.data[idx];
+    gradA.data[idx] = grad; // ∂L/∂a = grad
+    gradB.data[idx] = grad; // ∂L/∂b = grad
+}
