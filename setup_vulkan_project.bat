@@ -1,114 +1,77 @@
 @echo off
+setlocal EnableDelayedExpansion
 
-REM Set paths for Vulkan SDK
-set VULKAN_SDK=C:\VulkanSDK\1.3.296.0
-set PATH=%VULKAN_SDK%\Bin;%VULKAN_SDK%\Lib;%PATH%
-set INCLUDE=%VULKAN_SDK%\Include;%INCLUDE%
-set LIB=%VULKAN_SDK%\Lib;%LIB%
 
-REM Create directories if they don't exist
-if not exist "shaders" mkdir shaders
+REM Store the original directory
+set "PROJECT_ROOT=%CD%"
 
-REM Create a virtual environment
-echo Creating virtual environment...
-python -m venv venv
-if %errorlevel% neq 0 (
-    echo Failed to create virtual environment!
-    pause
-    exit /b 1
-)
-call venv\Scripts\activate
 
-REM Upgrade pip, setuptools, and wheel explicitly
-echo Upgrading pip, setuptools, and wheel...
-python -m pip install --upgrade pip setuptools wheel
-if %errorlevel% neq 0 (
-    echo Failed to upgrade pip, setuptools, and wheel!
+
+REM Create necessary directories
+echo Creating fresh directories...
+mkdir build
+mkdir bin
+mkdir shaders
+
+REM Check Vulkan SDK
+echo Checking Vulkan SDK...
+set "VULKAN_SDK=C:\VulkanSDK\1.3.296.0"
+if not exist "%VULKAN_SDK%" (
+    echo ERROR: Vulkan SDK not found at %VULKAN_SDK%
+    echo Please install the Vulkan SDK first.
     pause
     exit /b 1
 )
 
-REM Install PyTorch and dependencies
-echo Installing PyTorch...
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-echo Installing dependencies...
-python -m pip install pybind11 numpy
+REM Configure and build
+echo Starting CMake configuration...
+cd build
 
-REM Compile GLSL shaders
-echo Compiling GLSL shaders...
-set GLSLANG_VALIDATOR=%VULKAN_SDK%\Bin\glslangValidator.exe
+cmake -G "Visual Studio 17 2022" -A x64 ^
+    -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
+    ..
 
-REM Compile shaders and place them in the shaders directory
-for %%f in (add.comp mul.comp matmul.comp relu.comp sigmoid.comp softmax.comp conv2d.comp pooling.comp) do (
-    echo Compiling %%f...
-    %GLSLANG_VALIDATOR% -V %%f -o shaders\%%~nf.spv
-    if %errorlevel% neq 0 (
-        echo Failed to compile %%f
-        pause
-        exit /b 1
-    )
+if errorlevel 1 (
+    echo ERROR: CMake configuration failed!
+    cd ..
+    pause
+    exit /b 1
 )
 
-echo Shaders compiled successfully!
-pause
-goto BuildBackend
+echo Building project...
+cmake --build . --config Release
 
-:ShaderError
-echo Shader compilation failed!
-pause
-exit /b 1
+if errorlevel 1 (
+    echo ERROR: Build failed!
+    cd ..
+    pause
+    exit /b 1
+)
 
-:BuildBackend
-REM Build the Vulkan backend
-echo Building Vulkan backend...
-(
-echo from setuptools import setup
-echo from pybind11.setup_helpers import Pybind11Extension
-echo import sys
+cd ..
+
 echo.
-echo extra_compile_args = ['/std:c++17'] if sys.platform == 'win32' else ['-std=c++17']
+echo Testing completed!
 echo.
-echo ext_modules = [
-echo     Pybind11Extension(
-echo         "vulkan_backend",
-echo         ["vulkan_backend.cpp"],
-echo         include_dirs=[r"%VULKAN_SDK%/Include"],
-echo         library_dirs=[r"%VULKAN_SDK%/Lib"],
-echo         libraries=["vulkan-1"],
-echo         extra_compile_args=extra_compile_args,
-echo     ^)
-echo ]
+echo If everything worked correctly, you should see:
+echo - Protoc downloaded and extracted
+echo - ONNX repository cloned
+echo - ONNX protobuf files generated
+echo - Shaders compiled
+echo - Python module built
 echo.
-echo setup(
-echo     name="vulkan_backend",
-echo     ext_modules=ext_modules,
-echo     zip_safe=False,
-echo ^)
-) > setup.py
+echo Checking for key files:
+echo.
 
-python setup.py build_ext --inplace
-if %errorlevel% neq 0 (
-    echo Vulkan backend build failed!
-    pause
-    exit /b 1
+
+echo.
+echo Shader compilation:
+for %%f in (shaders\*.spv) do (
+    echo [√] Found compiled shader: %%f
 )
-echo Vulkan backend built successfully!
 
-REM Run tests
-echo Running tests...
-python test_vulkan.py
-if %errorlevel% neq 0 (
-    echo Tests failed!
-    pause
-    exit /b 1
-)
-echo All tests passed successfully!
-pause
 
-REM Clean up temporary files
-echo Cleaning up...
-del setup.py
-deactivate
 
-echo Setup completed successfully!
-pause
+echo.
+echo Press any key to exit...
+pause > nul

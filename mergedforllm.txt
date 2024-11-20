@@ -1,0 +1,558 @@
+// comp\add.comp
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer InputA {
+    float data[];
+} inputA;
+
+layout(std430, binding = 1) readonly buffer InputB {
+    float data[];
+} inputB;
+
+layout(std430, binding = 2) writeonly buffer Output {
+    float data[];
+} outputC;
+
+layout(push_constant) uniform PushConstants {
+    uint total_elements;
+} pc;
+
+void main() {
+    // Get global invocation ID
+    uint idx = gl_GlobalInvocationID.x;
+    
+    // Bounds check
+    if (idx >= pc.total_elements) {
+        return;
+    }
+    
+    // Load inputs with memory barrier for correctness
+    memoryBarrier();
+    barrier();
+    
+    float a = inputA.data[idx];
+    float b = inputB.data[idx];
+    
+    // Memory barrier to ensure loads complete
+    memoryBarrier();
+    barrier();
+    
+    // Perform addition
+    float result = a + b;
+    
+    // Memory barrier before store
+    memoryBarrier();
+    barrier();
+    
+    // Store result
+    outputC.data[idx] = result;
+    
+    // Final memory barrier
+    memoryBarrier();
+    barrier();
+}
+// comp\add_grad.comp
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer GradOutput {
+    float data[];
+} gradOut;
+
+layout(std430, binding = 1) writeonly buffer GradA {
+    float data[];
+} gradA;
+
+layout(std430, binding = 2) writeonly buffer GradB {
+    float data[];
+} gradB;
+
+layout(push_constant) uniform PushConstants {
+    uint total_elements; // Total number of elements
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.total_elements) return;
+
+    gradA.data[idx] = gradOut.data[idx];
+    gradB.data[idx] = gradOut.data[idx];
+}
+
+// comp\batchnorm.comp
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
+
+layout(std430, binding = 1) readonly buffer Mean {
+    float data[];
+} mean_buf;
+
+layout(std430, binding = 2) readonly buffer Variance {
+    float data[];
+} var_buf;
+
+layout(std430, binding = 3) readonly buffer Gamma {
+    float data[];
+} gamma_buf;
+
+layout(std430, binding = 4) readonly buffer Beta {
+    float data[];
+} beta_buf;
+
+layout(std430, binding = 5) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint N;        // Batch size
+    uint C;        // Channels
+    uint H;        // Height
+    uint W;        // Width
+    float epsilon; // Small constant for numerical stability
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total_size = pc.N * pc.C * pc.H * pc.W;
+
+    if (idx >= total_size) return;
+
+    uint c = (idx / (pc.H * pc.W)) % pc.C;
+
+    float mean = mean_buf.data[c];
+    float var = var_buf.data[c];
+    float gamma = gamma_buf.data[c];
+    float beta = beta_buf.data[c];
+
+    float x = input_buf.data[idx];
+    float normalized = (x - mean) / sqrt(var + pc.epsilon);
+    output_buf.data[idx] = gamma * normalized + beta;
+}
+
+// comp\conv2d.comp
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer Input {
+    float data[];
+} input_tensor;
+
+layout(std430, binding = 1) readonly buffer Kernel {
+    float data[];
+} kernel_tensor;
+
+layout(std430, binding = 2) writeonly buffer Output {
+    float data[];
+} output_tensor;
+
+layout(push_constant) uniform PushConstants {
+    uint input_width;
+    uint input_height;
+    uint input_channels;
+    uint output_channels;
+    uint kernel_size;
+    uint padding;
+    uint stride;
+} pc;
+
+uint get_input_offset(uint n, uint c, uint h, uint w) {
+    return ((n * pc.input_channels + c) * pc.input_height + h) * pc.input_width + w;
+}
+
+uint get_kernel_offset(uint out_c, uint in_c, uint kh, uint kw) {
+    return ((out_c * pc.input_channels + in_c) * pc.kernel_size + kh) * pc.kernel_size + kw;
+}
+
+uint get_output_offset(uint n, uint c, uint h, uint w) {
+    uint output_width = (pc.input_width + 2 * pc.padding - pc.kernel_size) / pc.stride + 1;
+    uint output_height = (pc.input_height + 2 * pc.padding - pc.kernel_size) / pc.stride + 1;
+    return ((n * pc.output_channels + c) * output_height + h) * output_width + w;
+}
+
+void main() {
+    uint out_x = gl_GlobalInvocationID.x;
+    uint out_y = gl_GlobalInvocationID.y;
+    uint out_c = gl_GlobalInvocationID.z;
+
+    uint output_width = (pc.input_width + 2 * pc.padding - pc.kernel_size) / pc.stride + 1;
+    uint output_height = (pc.input_height + 2 * pc.padding - pc.kernel_size) / pc.stride + 1;
+
+    if (out_x >= output_width || out_y >= output_height || out_c >= pc.output_channels) return;
+
+    float sum = 0.0;
+
+    for (uint in_c = 0; in_c < pc.input_channels; in_c++) {
+        for (uint kh = 0; kh < pc.kernel_size; kh++) {
+            for (uint kw = 0; kw < pc.kernel_size; kw++) {
+                int in_h = int(out_y * pc.stride) + int(kh) - int(pc.padding);
+                int in_w = int(out_x * pc.stride) + int(kw) - int(pc.padding);
+
+                if (in_h >= 0 && in_h < int(pc.input_height) && in_w >= 0 && in_w < int(pc.input_width)) {
+                    uint input_idx = get_input_offset(0, in_c, uint(in_h), uint(in_w));
+                    uint kernel_idx = get_kernel_offset(out_c, in_c, kh, kw);
+
+                    sum += input_tensor.data[input_idx] * kernel_tensor.data[kernel_idx];
+                }
+            }
+        }
+    }
+
+    uint out_idx = get_output_offset(0, out_c, out_y, out_x);
+    output_tensor.data[out_idx] = sum;
+}
+
+// comp\matmul.comp
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer InputA {
+    float data[];
+} inputA;
+
+layout(std430, binding = 1) readonly buffer InputB {
+    float data[];
+} inputB;
+
+layout(std430, binding = 2) writeonly buffer Output {
+    float data[];
+} outputC;
+
+layout(push_constant) uniform PushConstants {
+    uint M;  // Height of A
+    uint K;  // Width of A / Height of B
+    uint N;  // Width of B
+} pc;
+
+shared float tileA[16][16];
+shared float tileB[16][16];
+
+void main() {
+    uint row = gl_GlobalInvocationID.y;
+    uint col = gl_GlobalInvocationID.x;
+    uint localRow = gl_LocalInvocationID.y;
+    uint localCol = gl_LocalInvocationID.x;
+
+    float sum = 0.0;
+
+    uint numTiles = (pc.K + 15) / 16;
+
+    for (uint t = 0; t < numTiles; t++) {
+        uint aIdx = row * pc.K + t * 16 + localCol;
+        tileA[localRow][localCol] = (row < pc.M && (t * 16 + localCol) < pc.K) ? inputA.data[aIdx] : 0.0;
+
+        uint bIdx = (t * 16 + localRow) * pc.N + col;
+        tileB[localRow][localCol] = ((t * 16 + localRow) < pc.K && col < pc.N) ? inputB.data[bIdx] : 0.0;
+
+        barrier();
+
+        for (uint k = 0; k < 16; k++) {
+            sum += tileA[localRow][k] * tileB[k][localCol];
+        }
+
+        barrier();
+    }
+
+    if (row < pc.M && col < pc.N) {
+        uint cIdx = row * pc.N + col;
+        outputC.data[cIdx] = sum;
+    }
+}
+
+// comp\matmul_grad.comp
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer GradOutput {
+    float data[];
+} grad_output;
+
+layout(std430, binding = 1) readonly buffer InputA {
+    float data[];
+} input_a;
+
+layout(std430, binding = 2) readonly buffer InputB {
+    float data[];
+} input_b;
+
+layout(std430, binding = 3) buffer GradA {
+    float data[];
+} grad_a;
+
+layout(std430, binding = 4) buffer GradB {
+    float data[];
+} grad_b;
+
+layout(push_constant) uniform PushConstants {
+    uint M; // Height of A
+    uint K; // Width of A / Height of B
+    uint N; // Width of B
+} pc;
+
+shared float shared_grad[16][16];
+shared float shared_a[16][16];
+shared float shared_b[16][16];
+
+void main() {
+    uint row = gl_GlobalInvocationID.y;
+    uint col = gl_GlobalInvocationID.x;
+    uint local_row = gl_LocalInvocationID.y;
+    uint local_col = gl_LocalInvocationID.x;
+
+    if (row >= pc.M || col >= pc.N) return;
+
+    float grad = grad_output.data[row * pc.N + col];
+    
+    // Process in tiles to improve memory access patterns
+    for (uint tile = 0; tile < (pc.K + 15) / 16; ++tile) {
+        // Load data into shared memory
+        if (tile * 16 + local_col < pc.K) {
+            shared_a[local_row][local_col] = input_a.data[row * pc.K + tile * 16 + local_col];
+        }
+        if (tile * 16 + local_row < pc.K) {
+            shared_b[local_row][local_col] = input_b.data[(tile * 16 + local_row) * pc.N + col];
+        }
+        
+        barrier();
+        
+        // Compute gradients for this tile
+        for (uint k = 0; k < 16 && tile * 16 + k < pc.K; ++k) {
+            atomicAdd(grad_a.data[row * pc.K + tile * 16 + k], grad * shared_b[k][local_col]);
+            atomicAdd(grad_b.data[(tile * 16 + k) * pc.N + col], grad * shared_a[local_row][k]);
+        }
+        
+        barrier();
+    }
+}
+// comp\mul.comp
+#version 450
+layout(local_size_x = 256) in;
+
+layout(binding = 0) readonly buffer InputA {
+    float data[];
+} inputA;
+
+layout(binding = 1) readonly buffer InputB {
+    float data[];
+} inputB;
+
+layout(binding = 2) writeonly buffer Output {
+    float data[];
+} outputC;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < inputA.data.length()) { // Bounds check
+        outputC.data[idx] = inputA.data[idx] * inputB.data[idx]; // Element-wise multiplication
+    }
+}
+
+// comp\pooling.comp
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Input tensor
+layout(std430, binding = 0) readonly buffer Input {
+    float A[]; // Dimensions: channels x height x width
+} inputA;
+
+// Output tensor
+layout(std430, binding = 1) writeonly buffer Output {
+    float B[]; // Dimensions: channels x pooled_height x pooled_width
+} outputC;
+
+// Push constants for pooling parameters
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint channels;
+    uint poolSizeX;
+    uint poolSizeY;
+    uint strideX;
+    uint strideY;
+} pc;
+
+void main() {
+    uint out_x = gl_GlobalInvocationID.x;
+    uint out_y = gl_GlobalInvocationID.y;
+    uint channel = gl_GlobalInvocationID.z;
+
+    uint pooled_width = (pc.width - pc.poolSizeX) / pc.strideX + 1;
+    uint pooled_height = (pc.height - pc.poolSizeY) / pc.strideY + 1;
+
+    if (out_x >= pooled_width || out_y >= pooled_height || channel >= pc.channels) return;
+
+    float max_val = -3.402823466e+38; // Minimum float value
+
+    for (uint py = 0; py < pc.poolSizeY; py++) {
+        for (uint px = 0; px < pc.poolSizeX; px++) {
+            int in_x = int(out_x * pc.strideX + px);
+            int in_y = int(out_y * pc.strideY + py);
+
+            if (in_x >= 0 && in_x < int(pc.width) && in_y >= 0 && in_y < int(pc.height)) {
+                uint input_idx = channel * pc.width * pc.height + in_y * pc.width + in_x;
+                max_val = max(max_val, inputA.A[input_idx]);
+            }
+        }
+    }
+
+    uint output_idx = channel * pooled_width * pooled_height + out_y * pooled_width + out_x;
+    outputC.B[output_idx] = max_val;
+}
+
+// comp\relu.comp
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
+
+layout(std430, binding = 1) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint size;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    
+    // Bounds check
+    if (idx >= pc.size) {
+        return;
+    }
+    
+    // Memory barrier for correct input reading
+    memoryBarrier();
+    barrier();
+    
+    // Load input value
+    float val = input_buf.data[idx];
+    
+    // Memory barrier after load
+    memoryBarrier();
+    barrier();
+    
+    // ReLU operation: max(0, x)
+    float result = max(0.0, val);
+    
+    // Memory barrier before store
+    memoryBarrier();
+    barrier();
+    
+    // Store result
+    output_buf.data[idx] = result;
+    
+    // Final memory barrier
+    memoryBarrier();
+    barrier();
+}
+// comp\sigmoid.comp
+#version 450
+layout(local_size_x = 256) in;
+
+layout(binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
+
+layout(binding = 1) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < input_buf.data.length()) { // Bounds check
+        float x = input_buf.data[idx];
+        output_buf.data[idx] = 1.0 / (1.0 + exp(-x)); // Sigmoid function
+    }
+}
+
+// comp\softmax.comp
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_shader_atomic_float2 : require
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
+
+layout(std430, binding = 1) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint size;
+} pc;
+
+// Reduce shared memory usage
+shared float partial_sums[128];
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint local_idx = gl_LocalInvocationID.x;
+    
+    if (idx >= pc.size) return;
+    
+    // Two-pass algorithm to reduce memory usage
+    float val = input_buf.data[idx];
+    float max_val = -1e38;
+    
+    // First pass: find max
+    if (local_idx < 128) {
+        partial_sums[local_idx] = max_val;
+    }
+    barrier();
+    
+    if (idx < pc.size) {
+        atomicMax(partial_sums[local_idx % 128], val);
+    }
+    barrier();
+    
+    // Compute max across work group
+    if (local_idx == 0) {
+        max_val = partial_sums[0];
+        for (int i = 1; i < 128; i++) {
+            max_val = max(max_val, partial_sums[i]);
+        }
+        partial_sums[0] = max_val;
+    }
+    barrier();
+    
+    // Second pass: compute softmax
+    max_val = partial_sums[0];
+    float exp_val = exp(val - max_val);
+    
+    if (local_idx < 128) {
+        partial_sums[local_idx] = 0.0;
+    }
+    barrier();
+    
+    if (idx < pc.size) {
+        atomicAdd(partial_sums[local_idx % 128], exp_val);
+    }
+    barrier();
+    
+    if (local_idx == 0) {
+        float sum = 0.0;
+        for (int i = 0; i < 128; i++) {
+            sum += partial_sums[i];
+        }
+        partial_sums[0] = sum;
+    }
+    barrier();
+    
+    if (idx < pc.size) {
+        output_buf.data[idx] = exp_val / partial_sums[0];
+    }
+}

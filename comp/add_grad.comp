@@ -1,0 +1,26 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer GradOutput {
+    float data[];
+} gradOut;
+
+layout(std430, binding = 1) writeonly buffer GradA {
+    float data[];
+} gradA;
+
+layout(std430, binding = 2) writeonly buffer GradB {
+    float data[];
+} gradB;
+
+layout(push_constant) uniform PushConstants {
+    uint total_elements; // Total number of elements
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.total_elements) return;
+
+    gradA.data[idx] = gradOut.data[idx];
+    gradB.data[idx] = gradOut.data[idx];
+}

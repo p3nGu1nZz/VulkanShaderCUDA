@@ -1,0 +1,48 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
+
+layout(std430, binding = 1) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint size;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    
+    // Bounds check
+    if (idx >= pc.size) {
+        return;
+    }
+    
+    // Memory barrier for correct input reading
+    memoryBarrier();
+    barrier();
+    
+    // Load input value
+    float val = input_buf.data[idx];
+    
+    // Memory barrier after load
+    memoryBarrier();
+    barrier();
+    
+    // ReLU operation: max(0, x)
+    float result = max(0.0, val);
+    
+    // Memory barrier before store
+    memoryBarrier();
+    barrier();
+    
+    // Store result
+    output_buf.data[idx] = result;
+    
+    // Final memory barrier
+    memoryBarrier();
+    barrier();
+}

@@ -1,0 +1,52 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Input tensor
+layout(std430, binding = 0) readonly buffer Input {
+    float A[]; // Dimensions: channels x height x width
+} inputA;
+
+// Output tensor
+layout(std430, binding = 1) writeonly buffer Output {
+    float B[]; // Dimensions: channels x pooled_height x pooled_width
+} outputC;
+
+// Push constants for pooling parameters
+layout(push_constant) uniform PushConstants {
+    uint width;
+    uint height;
+    uint channels;
+    uint poolSizeX;
+    uint poolSizeY;
+    uint strideX;
+    uint strideY;
+} pc;
+
+void main() {
+    uint out_x = gl_GlobalInvocationID.x;
+    uint out_y = gl_GlobalInvocationID.y;
+    uint channel = gl_GlobalInvocationID.z;
+
+    uint pooled_width = (pc.width - pc.poolSizeX) / pc.strideX + 1;
+    uint pooled_height = (pc.height - pc.poolSizeY) / pc.strideY + 1;
+
+    if (out_x >= pooled_width || out_y >= pooled_height || channel >= pc.channels) return;
+
+    float max_val = -3.402823466e+38; // Minimum float value
+
+    for (uint py = 0; py < pc.poolSizeY; py++) {
+        for (uint px = 0; px < pc.poolSizeX; px++) {
+            int in_x = int(out_x * pc.strideX + px);
+            int in_y = int(out_y * pc.strideY + py);
+
+            if (in_x >= 0 && in_x < int(pc.width) && in_y >= 0 && in_y < int(pc.height)) {
+                uint input_idx = channel * pc.width * pc.height + in_y * pc.width + in_x;
+                max_val = max(max_val, inputA.A[input_idx]);
+            }
+        }
+    }
+
+    uint output_idx = channel * pooled_width * pooled_height + out_y * pooled_width + out_x;
+    outputC.B[output_idx] = max_val;
+}

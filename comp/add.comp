@@ -1,0 +1,53 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer InputA {
+    float data[];
+} inputA;
+
+layout(std430, binding = 1) readonly buffer InputB {
+    float data[];
+} inputB;
+
+layout(std430, binding = 2) writeonly buffer Output {
+    float data[];
+} outputC;
+
+layout(push_constant) uniform PushConstants {
+    uint total_elements;
+} pc;
+
+void main() {
+    // Get global invocation ID
+    uint idx = gl_GlobalInvocationID.x;
+    
+    // Bounds check
+    if (idx >= pc.total_elements) {
+        return;
+    }
+    
+    // Load inputs with memory barrier for correctness
+    memoryBarrier();
+    barrier();
+    
+    float a = inputA.data[idx];
+    float b = inputB.data[idx];
+    
+    // Memory barrier to ensure loads complete
+    memoryBarrier();
+    barrier();
+    
+    // Perform addition
+    float result = a + b;
+    
+    // Memory barrier before store
+    memoryBarrier();
+    barrier();
+    
+    // Store result
+    outputC.data[idx] = result;
+    
+    // Final memory barrier
+    memoryBarrier();
+    barrier();
+}

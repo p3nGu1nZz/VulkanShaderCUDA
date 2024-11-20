@@ -1,194 +1,159 @@
 # VulkanShaderCUDA
 
-**VulkanShaderCUDA** is a project that reimplements PyTorch-like tensor operations using Vulkan for high-performance compute on GPUs. The framework uses Vulkan's compute pipelines to perform core operations such as addition, matrix multiplication, ReLU activation, softmax, 2D convolution, and more. This serves as an alternative to CUDA-based solutions while leveraging Vulkan's cross-platform capabilities.
+**VulkanShaderCUDA** is a high-performance tensor computation framework that implements PyTorch-like operations using Vulkan compute shaders. The project aims to provide a vendor-agnostic alternative to CUDA-based deep learning frameworks, enabling GPU acceleration across a wider range of hardware.
 
-## **Features**
-- 🚀 **Core Tensor Operations**: Includes elementwise addition, multiplication, matrix multiplication, ReLU, sigmoid, softmax, 2D convolution, and pooling operations.
-- 🎯 **Vulkan-Based Compute Pipelines**: Fully utilizes Vulkan for GPU-accelerated computations.
-- 🧪 **Testing Framework**: Includes Python scripts to test Vulkan operations against NumPy outputs.
-- 🖥️ **Cross-Platform**: Designed to run on any Vulkan-capable GPU, making it more accessible than CUDA.
-- 🔧 **Custom GLSL Shaders**: Implements core operations as GLSL shaders compiled to SPIR-V for Vulkan execution.
+## Current Status
 
----
+### ✅ Working Features
+- **Core Operations**
+  - Element-wise addition with near-zero overhead
+  - Matrix multiplication (optimized with shared memory tiling)
+  - ReLU activation function
+  - Sigmoid activation function (numerically stable implementation)
+  - All core operations validated against PyTorch with matching precision
 
-## **Getting Started**
+- **Memory Management**
+  - Zero-copy buffer pooling system
+  - Efficient resource reuse
+  - Automated cleanup
 
-### **Prerequisites**
+### 🚧 Under Development
+- **Advanced Operations**
+  - Softmax (numerical stability improvements in progress)
+  - MaxPool2D (implementation refinements ongoing)
+  - Conv2D (tensor reshape handling in progress)
+  
+- **Gradient Computations**
+  - Element-wise operation gradients complete
+  - Matrix multiplication gradients working
+  - Advanced operation gradients in development
+
+## Architecture
+
+### Core Design
+- Memory-first architecture with buffer pooling
+- Vulkan compute shader-based operations
+- PyBind11 integration for seamless NumPy interop
+- SPIR-V shader compilation pipeline
+
+### Performance Features
+- Shared memory utilization in compute shaders
+- Workgroup size optimization
+- Asynchronous command buffer execution
+- Minimal host-device transfers
+
+## Prerequisites
+
 1. **Vulkan SDK**:
-   - Install the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home).
-   - Add the Vulkan SDK to your environment variables:
-     - **Windows**:
-       ```bash
-       set VULKAN_SDK=C:\Path\To\Vulkan\SDK
-       set PATH=%VULKAN_SDK%\Bin;%PATH%
-       ```
-     - Verify installation with:
-       ```bash
-       vulkaninfo
-       ```
+   ```bash
+   # Download and install from:
+   https://vulkan.lunarg.com/sdk/home
+   # Minimum version: 1.3.296.0
+   ```
 
 2. **Python Environment**:
-   - Install Python 3.10 or later.
-   - Install required Python libraries:
-     ```bash
-     pip install numpy pybind11
-     ```
+   ```bash
+   pip install numpy pybind11 torch torchvision torchaudio
+   ```
 
-3. **GLSL Shader Compiler**:
-   - Ensure `glslangValidator` is available in your `PATH` (comes with Vulkan SDK).
+## Quick Start
 
----
-
-### **Project Structure**
-
-```plaintext
-VulkanShaderCUDA/
-│
-├── compile_shaders.sh       # Script to compile GLSL shaders to SPIR-V binaries
-├── vulkan_backend.cpp       # Vulkan backend implementation (C++ with Pybind11 bindings)
-├── test_vulkan.py           # Python script for testing operations
-│
-├── add.glsl                 # GLSL shader for elementwise addition
-├── mul.glsl                 # GLSL shader for elementwise multiplication
-├── matmul.glsl              # GLSL shader for matrix multiplication
-├── relu.glsl                # GLSL shader for ReLU activation
-├── sigmoid.glsl             # GLSL shader for Sigmoid activation
-├── softmax.glsl             # GLSL shader for Softmax activation
-├── conv2d.glsl              # GLSL shader for 2D convolution
-├── pooling.glsl             # GLSL shader for pooling operations (max/avg)
+### Windows Setup
+```batch
+setup_vulkan_project.bat
 ```
 
----
+The script handles:
+- Vulkan SDK environment configuration
+- Python virtual environment setup
+- Dependency installation
+- SPIR-V shader compilation
+- Backend module building
 
-### **Setup**
+## Usage Examples
 
-#### 1. **Compile Shaders**
-Navigate to the project directory and run the `compile_shaders.sh` script to compile all GLSL shaders into SPIR-V binaries:
-
-```bash
-./compile_shaders.sh
-```
-
-This will generate SPIR-V binaries (`.spv`) for each GLSL shader.
-
-#### 2. **Build the Vulkan Backend**
-Create a `setup.py` file for compiling the C++ Vulkan backend using Pybind11:
-
+### Basic Operations
 ```python
-from setuptools import setup, Extension
-from pybind11.setup_helpers import Pybind11Extension
+import numpy as np
+from vulkan_backend import init_vulkan, vulkan_add, vulkan_matmul
 
-ext_modules = [
-    Pybind11Extension(
-        "vulkan_backend",
-        ["vulkan_backend.cpp"],
-        include_dirs=["C:/Path/To/Vulkan/SDK/Include"],
-        library_dirs=["C:/Path/To/Vulkan/SDK/Lib"],
-        libraries=["vulkan-1"],
-    ),
-]
+# Initialize Vulkan
+init_vulkan()
 
-setup(
-    name="vulkan_backend",
-    ext_modules=ext_modules,
-    zip_safe=False,
-)
+# Element-wise Addition
+a = np.random.rand(1024).astype(np.float32)
+b = np.random.rand(1024).astype(np.float32)
+c = np.zeros_like(a)
+vulkan_add(a, b, c)
+
+# Matrix Multiplication
+M, K, N = 128, 256, 128
+a = np.random.rand(M, K).astype(np.float32)
+b = np.random.rand(K, N).astype(np.float32)
+c = np.zeros((M, N), dtype=np.float32)
+vulkan_matmul(a.flatten(), b.flatten(), c.flatten(), M, K, N)
+
+# Activation Functions
+vulkan_relu(input_data.flatten(), output.flatten())
+vulkan_sigmoid(input_data.flatten(), output.flatten())
 ```
 
-Run the setup script to build the Vulkan backend:
+## Development Roadmap
 
-```bash
-python setup.py build_ext --inplace
-```
+### Short-term Goals
+1. Stabilize Softmax implementation
+2. Complete Conv2D tensor handling
+3. Optimize MaxPool2D implementation
+4. Add BatchNorm support
 
-This generates `vulkan_backend.pyd` in the current directory.
+### Medium-term Goals
+1. Implement automatic differentiation
+2. Add layer abstractions
+3. Support model import/export
+4. Optimize memory patterns for training
 
-#### 3. **Run the Tests**
-Run the Python test suite to verify all Vulkan operations:
+### Long-term Vision
+1. Full PyTorch model compatibility
+2. Custom model deployment pipeline
+3. Mobile GPU optimization
+4. Distributed computing support
 
-```bash
-python test_vulkan.py
-```
+## Technical Details
 
----
+### Memory Management
+- Smart buffer pooling system
+- Automatic resource cleanup
+- Zero-copy operations where possible
+- Shared memory optimization
 
-### **Available Operations**
+### Shader Implementation
+- SPIR-V based compute shaders
+- Workgroup optimization
+- Local memory utilization
+- Batched operation support
 
-| Operation          | GLSL Shader     | Description                          |
-|---------------------|-----------------|--------------------------------------|
-| **Addition**        | `add.glsl`      | Elementwise addition of two tensors. |
-| **Multiplication**  | `mul.glsl`      | Elementwise multiplication of two tensors. |
-| **Matrix Multiplication** | `matmul.glsl` | Matrix multiplication of two tensors. |
-| **ReLU Activation** | `relu.glsl`     | Applies ReLU activation to the input tensor. |
-| **Sigmoid Activation** | `sigmoid.glsl` | Applies Sigmoid activation to the input tensor. |
-| **Softmax**         | `softmax.glsl`  | Computes softmax over the input tensor. |
-| **2D Convolution**  | `conv2d.glsl`   | Performs 2D convolution on input data. |
-| **Pooling**         | `pooling.glsl`  | Performs max or average pooling.      |
+## Contributing
 
----
+Contributions are welcome! We're particularly interested in:
 
-### **Testing Framework**
+1. Numerical stability improvements
+2. Memory optimization techniques
+3. New operation implementations
+4. Testing and validation
 
-The `test_vulkan.py` script validates each Vulkan operation by comparing its output to NumPy computations. Each test performs the following steps:
-1. Generate random input tensors.
-2. Compute expected output using NumPy.
-3. Perform the operation using the Vulkan backend.
-4. Compare the Vulkan results with NumPy results.
+## Support
 
-Example Test Output:
-```
-Starting Vulkan backend tests...
-Testing Vulkan addition...
-Addition test passed!
+For technical support:
+- Discord: Contact **waefrebeorn**
+- Submit issues through GitHub
 
-Testing Vulkan matrix multiplication...
-Matrix multiplication test passed!
+## License
 
-Testing Vulkan ReLU activation...
-ReLU test passed!
+MIT License - See LICENSE file for details
 
-Testing Vulkan softmax...
-Softmax test passed!
+## Acknowledgments
 
-Testing Vulkan 2D convolution...
-Convolution test passed!
-
-All tests completed successfully!
-```
-
----
-
-### **Why VulkanShaderCUDA?**
-
-- **Cross-Platform**: Vulkan is supported on Windows, Linux, and macOS, unlike CUDA, which is limited to NVIDIA GPUs.
-- **Efficiency**: Vulkan's low-level control enables high-performance computations.
-- **Expandability**: Easily add custom GLSL shaders for additional operations.
-- **PyTorch-Like Operations**: Implements many commonly used operations for deep learning and tensor manipulation.
-
----
-
-### **Future Enhancements**
-
-- Implement additional PyTorch operations (e.g., BatchNorm, Dropout).
-- Add support for batched computations.
-- Optimize shader pipelines for larger-scale workloads.
-- Explore integration with deep learning frameworks like TensorFlow or PyTorch.
-
----
-
-### **Contributing**
-
-Contributions are welcome! To contribute:
-1. Fork the repository.
-2. Create a new branch for your feature or bug fix.
-3. Submit a pull request with a detailed description of your changes.
-
----
-
-### **License**
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
----
-
-Feel free to let me know if you'd like to adjust any specific section!
+- Vulkan SDK team for comprehensive documentation
+- PyBind11 team for Python binding capabilities
+- PyTorch team for architectural inspiration
+- Open-source ML community for testing and feedback

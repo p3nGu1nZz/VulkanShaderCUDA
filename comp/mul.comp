@@ -1,0 +1,21 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(binding = 0) readonly buffer InputA {
+    float data[];
+} inputA;
+
+layout(binding = 1) readonly buffer InputB {
+    float data[];
+} inputB;
+
+layout(binding = 2) writeonly buffer Output {
+    float data[];
+} outputC;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < inputA.data.length()) { // Bounds check
+        outputC.data[idx] = inputA.data[idx] * inputB.data[idx]; // Element-wise multiplication
+    }
+}

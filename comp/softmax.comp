@@ -1,0 +1,79 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_shader_atomic_float2 : require
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
+
+layout(std430, binding = 1) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint size;
+} pc;
+
+// Reduce shared memory usage
+shared float partial_sums[128];
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint local_idx = gl_LocalInvocationID.x;
+    
+    if (idx >= pc.size) return;
+    
+    // Two-pass algorithm to reduce memory usage
+    float val = input_buf.data[idx];
+    float max_val = -1e38;
+    
+    // First pass: find max
+    if (local_idx < 128) {
+        partial_sums[local_idx] = max_val;
+    }
+    barrier();
+    
+    if (idx < pc.size) {
+        atomicMax(partial_sums[local_idx % 128], val);
+    }
+    barrier();
+    
+    // Compute max across work group
+    if (local_idx == 0) {
+        max_val = partial_sums[0];
+        for (int i = 1; i < 128; i++) {
+            max_val = max(max_val, partial_sums[i]);
+        }
+        partial_sums[0] = max_val;
+    }
+    barrier();
+    
+    // Second pass: compute softmax
+    max_val = partial_sums[0];
+    float exp_val = exp(val - max_val);
+    
+    if (local_idx < 128) {
+        partial_sums[local_idx] = 0.0;
+    }
+    barrier();
+    
+    if (idx < pc.size) {
+        atomicAdd(partial_sums[local_idx % 128], exp_val);
+    }
+    barrier();
+    
+    if (local_idx == 0) {
+        float sum = 0.0;
+        for (int i = 0; i < 128; i++) {
+            sum += partial_sums[i];
+        }
+        partial_sums[0] = sum;
+    }
+    barrier();
+    
+    if (idx < pc.size) {
+        output_buf.data[idx] = exp_val / partial_sums[0];
+    }
+}

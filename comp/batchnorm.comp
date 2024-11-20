@@ -1,0 +1,52 @@
+#version 450
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Input {
+    float data[];
+} input_buf;
+
+layout(std430, binding = 1) readonly buffer Mean {
+    float data[];
+} mean_buf;
+
+layout(std430, binding = 2) readonly buffer Variance {
+    float data[];
+} var_buf;
+
+layout(std430, binding = 3) readonly buffer Gamma {
+    float data[];
+} gamma_buf;
+
+layout(std430, binding = 4) readonly buffer Beta {
+    float data[];
+} beta_buf;
+
+layout(std430, binding = 5) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint N;        // Batch size
+    uint C;        // Channels
+    uint H;        // Height
+    uint W;        // Width
+    float epsilon; // Small constant for numerical stability
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total_size = pc.N * pc.C * pc.H * pc.W;
+
+    if (idx >= total_size) return;
+
+    uint c = (idx / (pc.H * pc.W)) % pc.C;
+
+    float mean = mean_buf.data[c];
+    float var = var_buf.data[c];
+    float gamma = gamma_buf.data[c];
+    float beta = beta_buf.data[c];
+
+    float x = input_buf.data[idx];
+    float normalized = (x - mean) / sqrt(var + pc.epsilon);
+    output_buf.data[idx] = gamma * normalized + beta;
+}
