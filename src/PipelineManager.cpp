@@ -1,6 +1,10 @@
+// PipelineManager.cpp
+
 #include "PipelineManager.h"
+#include "vulkan_globals.h"
+#include "spdlog/spdlog.h"
 #include <fstream>
-#include <spdlog/spdlog.h>
+#include <filesystem>
 
 PipelineManager::PipelineManager(std::shared_ptr<ShaderManager> shaderManager, VkDevice device)
     : shaderManager(shaderManager), device(device) {}
@@ -36,6 +40,43 @@ std::size_t PipelineKeyHash::operator()(const PipelineKey& key) const {
     res ^= std::hash<uint32_t>()(key.workgroupSizeZ) + 0x9e3779b9 + (res << 6) + (res >> 2);
 
     return res;
+}
+
+std::string PipelineManager::getShaderName(VulkanOperationType opType) const {
+    switch (opType) {
+        case VulkanOperationType::MatMul:   return "matmul.comp.spv";
+        case VulkanOperationType::Conv2D:   return "conv2d.comp.spv";
+        case VulkanOperationType::ReLU:     return "relu.comp.spv";
+        case VulkanOperationType::Sigmoid:  return "sigmoid.comp.spv";
+        case VulkanOperationType::Softmax:  return "softmax.comp.spv";
+        case VulkanOperationType::MaxPool:  return "pooling.comp.spv";
+        case VulkanOperationType::BatchNorm: return "batchnorm.comp.spv";
+        case VulkanOperationType::Add:      return "add.comp.spv";
+        default:
+            throw VulkanError("Unknown Vulkan operation type.");
+    }
+}
+
+std::vector<char> PipelineManager::loadShaderCode(const std::string& shaderName) const {
+    std::filesystem::path shaderPath = vulkan_globals::shader_directory / shaderName;
+    
+    // Convert path to string for opening file
+    std::string shaderPathStr = shaderPath.string();
+    std::ifstream file(shaderPathStr, std::ios::binary | std::ios::ate);
+    
+    if (!file.is_open()) {
+        throw VulkanError("Failed to open shader file: " + shaderPathStr);
+    }
+
+    size_t fileSize = static_cast<size_t>(file.tellg());
+    std::vector<char> buffer(fileSize);
+
+    file.seekg(0);
+    file.read(buffer.data(), fileSize);
+    file.close();
+
+    spdlog::info("Successfully loaded shader: {}", shaderPathStr);
+    return buffer;
 }
 
 VkPipeline PipelineManager::getPipeline(const PipelineKey& key) {
@@ -131,38 +172,4 @@ VkPipelineLayout PipelineManager::getPipelineLayout(const PipelineKey& key) {
     // Store and return the created layout
     pipelineLayouts[key] = pipelineLayout;
     return pipelineLayout;
-}
-
-std::string PipelineManager::getShaderName(VulkanOperationType opType) const {
-    // Map operation type to shader name
-    switch (opType) {
-        case VulkanOperationType::MatMul:   return "matmul.comp.spv";
-        case VulkanOperationType::Conv2D:   return "conv2d.comp.spv";
-        case VulkanOperationType::ReLU:     return "relu.comp.spv";
-        case VulkanOperationType::Sigmoid:  return "sigmoid.comp.spv";
-        case VulkanOperationType::Softmax:  return "softmax.comp.spv";
-        case VulkanOperationType::MaxPool:  return "maxpool.comp.spv";
-        case VulkanOperationType::BatchNorm: return "batchnorm.comp.spv";
-        case VulkanOperationType::Add:      return "add.comp.spv";
-        default:
-            throw VulkanError("Unknown Vulkan operation type.");
-    }
-}
-
-std::vector<char> PipelineManager::loadShaderCode(const std::string& shaderName) const {
-    // Load shader binary from file
-    std::string shaderPath = "shaders/" + shaderName;
-    std::ifstream file(shaderPath, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        throw VulkanError("Failed to open shader file: " + shaderPath);
-    }
-
-    size_t fileSize = static_cast<size_t>(file.tellg());
-    std::vector<char> buffer(fileSize);
-
-    file.seekg(0);
-    file.read(buffer.data(), fileSize);
-    file.close();
-
-    return buffer;
 }

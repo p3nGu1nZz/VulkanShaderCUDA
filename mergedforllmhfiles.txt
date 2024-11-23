@@ -247,6 +247,7 @@ private:
 
 #endif // VULKAN_BUFFER_POOL_H
 // src\VulkanContext.h
+// src\VulkanContext.h
 #ifndef VULKAN_CONTEXT_H
 #define VULKAN_CONTEXT_H
 
@@ -264,7 +265,7 @@ public:
     VulkanContext();
     ~VulkanContext();
 
-    void initVulkan();   // Initialize Vulkan resources
+    void initVulkan();    // Initialize Vulkan resources
     void cleanupVulkan(); // Cleanup Vulkan resources
 
     // Accessors
@@ -273,6 +274,8 @@ public:
     PipelineManager* getPipelineManager() const { return pipelineManager.get(); }
     CommandBufferManager* getCommandBufferManager() const { return commandBufferManager.get(); }
     std::shared_ptr<DescriptorSetManager> getDescriptorSetManager() const { return descriptorSetManager; }
+    
+    VkDevice getDevice() const { return device; } // Added getter for VkDevice
 
 private:
     // Vulkan instance and devices
@@ -688,6 +691,8 @@ private:
 
 #include <vulkan/vulkan.h>
 #include <memory>
+#include <string>
+#include <filesystem>
 #include "VulkanContext.h"
 
 // Namespace for global Vulkan objects
@@ -700,6 +705,10 @@ namespace vulkan_globals {
     extern VkCommandPool commandPool;
     extern VkDescriptorPool descriptorPool;
 
+    // Add shader path handling
+    extern std::filesystem::path shader_directory;
+    void setShaderDirectory(const std::filesystem::path& exe_path);
+
     // Vulkan context instance
     extern std::unique_ptr<VulkanContext> vulkanContextInstance;
 
@@ -710,4 +719,3 @@ namespace vulkan_globals {
 }
 
 #endif // VULKAN_GLOBALS_H
-

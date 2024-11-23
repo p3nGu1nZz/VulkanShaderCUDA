@@ -151,9 +151,13 @@ onnx::TensorProto OnnxModelParser::getInitializer(const std::string& name) const
     throw std::runtime_error("Initializer not found: " + name);
 }
 // src\PipelineManager.cpp
+// PipelineManager.cpp
+
 #include "PipelineManager.h"
+#include "vulkan_globals.h"
+#include "spdlog/spdlog.h"
 #include <fstream>
-#include <spdlog/spdlog.h>
+#include <filesystem>
 
 PipelineManager::PipelineManager(std::shared_ptr<ShaderManager> shaderManager, VkDevice device)
     : shaderManager(shaderManager), device(device) {}
@@ -189,6 +193,43 @@ std::size_t PipelineKeyHash::operator()(const PipelineKey& key) const {
     res ^= std::hash<uint32_t>()(key.workgroupSizeZ) + 0x9e3779b9 + (res << 6) + (res >> 2);
 
     return res;
+}
+
+std::string PipelineManager::getShaderName(VulkanOperationType opType) const {
+    switch (opType) {
+        case VulkanOperationType::MatMul:   return "matmul.comp.spv";
+        case VulkanOperationType::Conv2D:   return "conv2d.comp.spv";
+        case VulkanOperationType::ReLU:     return "relu.comp.spv";
+        case VulkanOperationType::Sigmoid:  return "sigmoid.comp.spv";
+        case VulkanOperationType::Softmax:  return "softmax.comp.spv";
+        case VulkanOperationType::MaxPool:  return "pooling.comp.spv";
+        case VulkanOperationType::BatchNorm: return "batchnorm.comp.spv";
+        case VulkanOperationType::Add:      return "add.comp.spv";
+        default:
+            throw VulkanError("Unknown Vulkan operation type.");
+    }
+}
+
+std::vector<char> PipelineManager::loadShaderCode(const std::string& shaderName) const {
+    std::filesystem::path shaderPath = vulkan_globals::shader_directory / shaderName;
+    
+    // Convert path to string for opening file
+    std::string shaderPathStr = shaderPath.string();
+    std::ifstream file(shaderPathStr, std::ios::binary | std::ios::ate);
+    
+    if (!file.is_open()) {
+        throw VulkanError("Failed to open shader file: " + shaderPathStr);
+    }
+
+    size_t fileSize = static_cast<size_t>(file.tellg());
+    std::vector<char> buffer(fileSize);
+
+    file.seekg(0);
+    file.read(buffer.data(), fileSize);
+    file.close();
+
+    spdlog::info("Successfully loaded shader: {}", shaderPathStr);
+    return buffer;
 }
 
 VkPipeline PipelineManager::getPipeline(const PipelineKey& key) {
@@ -285,41 +326,6 @@ VkPipelineLayout PipelineManager::getPipelineLayout(const PipelineKey& key) {
     pipelineLayouts[key] = pipelineLayout;
     return pipelineLayout;
 }
-
-std::string PipelineManager::getShaderName(VulkanOperationType opType) const {
-    // Map operation type to shader name
-    switch (opType) {
-        case VulkanOperationType::MatMul:   return "matmul.comp.spv";
-        case VulkanOperationType::Conv2D:   return "conv2d.comp.spv";
-        case VulkanOperationType::ReLU:     return "relu.comp.spv";
-        case VulkanOperationType::Sigmoid:  return "sigmoid.comp.spv";
-        case VulkanOperationType::Softmax:  return "softmax.comp.spv";
-        case VulkanOperationType::MaxPool:  return "maxpool.comp.spv";
-        case VulkanOperationType::BatchNorm: return "batchnorm.comp.spv";
-        case VulkanOperationType::Add:      return "add.comp.spv";
-        default:
-            throw VulkanError("Unknown Vulkan operation type.");
-    }
-}
-
-std::vector<char> PipelineManager::loadShaderCode(const std::string& shaderName) const {
-    // Load shader binary from file
-    std::string shaderPath = "shaders/" + shaderName;
-    std::ifstream file(shaderPath, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        throw VulkanError("Failed to open shader file: " + shaderPath);
-    }
-
-    size_t fileSize = static_cast<size_t>(file.tellg());
-    std::vector<char> buffer(fileSize);
-
-    file.seekg(0);
-    file.read(buffer.data(), fileSize);
-    file.close();
-
-    return buffer;
-}
-
 // src\ShaderManager.cpp
 // src\ShaderManager.cpp
 
@@ -411,91 +417,252 @@ void VulkanBufferPool::releaseBuffer(VkBuffer buffer) {
 }
 
 // src\VulkanContext.cpp
+// src\VulkanContext.cpp
 #include "VulkanContext.h"
-#include "VulkanError.h"
+#include "vulkan_globals.h"
 #include "spdlog/spdlog.h"
 
-VulkanContext::VulkanContext()
-    : instance(VK_NULL_HANDLE), physicalDevice(VK_NULL_HANDLE), device(VK_NULL_HANDLE), computeQueue(VK_NULL_HANDLE) {}
+#include <stdexcept>
+#include <vector>
+#include <algorithm>
 
+// Constructor
+VulkanContext::VulkanContext()
+    : instance(VK_NULL_HANDLE), physicalDevice(VK_NULL_HANDLE),
+      device(VK_NULL_HANDLE), computeQueue(VK_NULL_HANDLE),
+      computeQueueFamilyIndex(std::numeric_limits<uint32_t>::max()) {}
+
+// Destructor
 VulkanContext::~VulkanContext() {
     cleanupVulkan();
 }
 
+// Initialize Vulkan resources
 void VulkanContext::initVulkan() {
-    spdlog::info("Initializing Vulkan...");
-    // Create Vulkan instance
+    spdlog::info("Creating Vulkan instance...");
+
+    // 1. Create Vulkan Instance
     VkApplicationInfo appInfo = {};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "VulkanBackend";
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "NoEngine";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_2;
+    appInfo.apiVersion = VK_API_VERSION_1_2; // Ensure compatibility
 
     VkInstanceCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     createInfo.pApplicationInfo = &appInfo;
 
-    if (vkCreateInstance(&createInfo, nullptr, &instance) != VK_SUCCESS) {
-        throw VulkanError("Failed to create Vulkan instance");
+    // Optional: Enable validation layers during development
+    std::vector<const char*> validationLayers = {
+        "VK_LAYER_KHRONOS_validation"
+    };
+#ifdef NDEBUG
+    const bool enableValidationLayers = false;
+#else
+    const bool enableValidationLayers = true;
+    createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+    createInfo.ppEnabledLayerNames = validationLayers.data();
+#endif
+
+    // Optional: Specify required extensions
+    std::vector<const char*> extensions = {
+        // Add necessary extensions here, e.g., "VK_KHR_surface", "VK_KHR_win32_surface" for Windows
+    };
+    createInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+    createInfo.ppEnabledExtensionNames = extensions.data();
+
+    VkResult result = vkCreateInstance(&createInfo, nullptr, &instance);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create Vulkan instance.");
     }
+
     spdlog::info("Vulkan instance created.");
 
-    // Pick a physical device
+    // 2. Pick Physical Device
     pickPhysicalDevice();
-    // Create logical device
+
+    spdlog::info("Selected Vulkan physical device.");
+
+    // 3. Find Compute Queue Family Index
+    findComputeQueueFamily();
+
+    spdlog::info("Found compute queue family index: {}", computeQueueFamilyIndex);
+
+    // 4. Create Logical Device and Retrieve Queues
     createLogicalDevice();
-    // Initialize managers
+
+    spdlog::info("Logical device created and compute queue retrieved.");
+
+    // 5. Create Command Pool
+    VkCommandPoolCreateInfo poolInfo = {};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.queueFamilyIndex = computeQueueFamilyIndex;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT; // Allow resetting individual command buffers
+
+    result = vkCreateCommandPool(device, &poolInfo, nullptr, &vulkan_globals::commandPool);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create command pool.");
+    }
+
+    spdlog::info("Command pool created.");
+
+    // 6. Create Descriptor Pool
+    VkDescriptorPoolSize poolSize = {};
+    poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    poolSize.descriptorCount = 1000; // Adjust as needed based on application requirements
+
+    VkDescriptorPoolCreateInfo poolCreateInfo = {};
+    poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolCreateInfo.poolSizeCount = 1;
+    poolCreateInfo.pPoolSizes = &poolSize;
+    poolCreateInfo.maxSets = 1000; // Adjust as needed
+
+    result = vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &vulkan_globals::descriptorPool);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create descriptor pool.");
+    }
+
+    spdlog::info("Descriptor pool created.");
+
+    // 7. Create Descriptor Set Layout
+    VkDescriptorSetLayoutBinding layoutBinding = {};
+    layoutBinding.binding = 0;
+    layoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    layoutBinding.descriptorCount = 1;
+    layoutBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    layoutBinding.pImmutableSamplers = nullptr;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &layoutBinding;
+
+    VkDescriptorSetLayout descriptorSetLayout;
+    result = vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create descriptor set layout.");
+    }
+
+    spdlog::info("Descriptor set layout created.");
+
+    // 8. Initialize Managers
     memoryManager = std::make_unique<VulkanMemoryManager>(physicalDevice, device);
     bufferPool = std::make_unique<VulkanBufferPool>(device);
-    pipelineManager = std::make_unique<PipelineManager>(nullptr, device); // Adjust as needed
-    commandBufferManager = std::make_unique<CommandBufferManager>(device, VK_NULL_HANDLE); // Adjust as needed
-    descriptorSetManager = std::make_shared<DescriptorSetManager>(device, VK_NULL_HANDLE, VK_NULL_HANDLE); // Adjust
+    
+    // Initialize ShaderManager
+    std::shared_ptr<ShaderManager> shaderMgr = std::make_shared<ShaderManager>(device);
+    
+    // Initialize PipelineManager
+    pipelineManager = std::make_unique<PipelineManager>(shaderMgr, device);
+    
+    // Initialize CommandBufferManager
+    commandBufferManager = std::make_unique<CommandBufferManager>(device, vulkan_globals::commandPool);
+    
+    // Initialize DescriptorSetManager with the created layout
+    descriptorSetManager = std::make_shared<DescriptorSetManager>(device, vulkan_globals::descriptorPool, descriptorSetLayout);
+
+    spdlog::info("CommandBufferManager created.");
+    spdlog::info("DescriptorSetManager created.");
+
+    // Assign the Vulkan device and compute queue to the global variables
+    vulkan_globals::device = device;
+    vulkan_globals::computeQueue = computeQueue;
+
     spdlog::info("VulkanContext fully initialized.");
+    spdlog::info("VulkanContext initialized successfully.");
 }
 
+// Cleanup Vulkan resources
 void VulkanContext::cleanupVulkan() {
     if (device != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(device);
-    }
+        spdlog::info("Cleaning up VulkanContext...");
 
-    memoryManager.reset();
-    bufferPool.reset();
-    pipelineManager.reset();
-    commandBufferManager.reset();
-    descriptorSetManager.reset();
+        // Cleanup managers in reverse order of creation
+        descriptorSetManager.reset();
+        commandBufferManager.reset();
+        pipelineManager.reset();
+        bufferPool.reset();
+        memoryManager.reset();
 
-    if (device != VK_NULL_HANDLE) {
+        // Destroy Descriptor Set Layout
+        // Note: Assuming DescriptorSetManager does not store the layout; if it does, ensure it's destroyed there
+        // If layout needs to be destroyed here, maintain a member variable for it
+
+        vkDestroyDescriptorPool(device, vulkan_globals::descriptorPool, nullptr);
+        vkDestroyCommandPool(device, vulkan_globals::commandPool, nullptr);
+
         vkDestroyDevice(device, nullptr);
         device = VK_NULL_HANDLE;
+
+        spdlog::info("Logical device destroyed.");
     }
+
     if (instance != VK_NULL_HANDLE) {
         vkDestroyInstance(instance, nullptr);
         instance = VK_NULL_HANDLE;
+
+        spdlog::info("Vulkan instance destroyed.");
     }
+
+    // Reset global device and compute queue variables
+    vulkan_globals::device = VK_NULL_HANDLE;
+    vulkan_globals::computeQueue = VK_NULL_HANDLE;
 
     spdlog::info("VulkanContext cleaned up.");
 }
 
+// Pick a suitable physical device
 void VulkanContext::pickPhysicalDevice() {
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+
     if (deviceCount == 0) {
-        throw VulkanError("Failed to find GPUs with Vulkan support");
+        throw std::runtime_error("Failed to find GPUs with Vulkan support.");
     }
 
     std::vector<VkPhysicalDevice> devices(deviceCount);
     vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
 
-    // Use the first available device for simplicity
-    physicalDevice = devices[0];
-    spdlog::info("Selected Vulkan physical device.");
+    // Select the first suitable device
+    for (const auto& dev : devices) {
+        // Here, you can add more checks to select a better device based on criteria like Vulkan version, extensions, etc.
+        physicalDevice = dev;
+        break;
+    }
+
+    if (physicalDevice == VK_NULL_HANDLE) {
+        throw std::runtime_error("Failed to find a suitable GPU.");
+    }
 }
 
-void VulkanContext::createLogicalDevice() {
-    findComputeQueueFamily();
+// Find a queue family that supports compute operations
+void VulkanContext::findComputeQueueFamily() {
+    uint32_t queueFamilyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
 
+    if (queueFamilyCount == 0) {
+        throw std::runtime_error("Failed to find any queue families.");
+    }
+
+    std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
+
+    // Look for a queue family that supports compute
+    for (uint32_t i = 0; i < queueFamilies.size(); ++i) {
+        if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+            computeQueueFamilyIndex = i;
+            computeQueue = VK_NULL_HANDLE; // Will be retrieved after device creation
+            return;
+        }
+    }
+
+    throw std::runtime_error("Failed to find a compute queue family.");
+}
+
+// Create a logical device and retrieve compute queue
+void VulkanContext::createLogicalDevice() {
     float queuePriority = 1.0f;
     VkDeviceQueueCreateInfo queueCreateInfo = {};
     queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -503,32 +670,48 @@ void VulkanContext::createLogicalDevice() {
     queueCreateInfo.queueCount = 1;
     queueCreateInfo.pQueuePriorities = &queuePriority;
 
+    // Specify device features if needed
+    VkPhysicalDeviceFeatures deviceFeatures = {};
+    deviceFeatures.shaderStorageImageExtendedFormats = VK_TRUE; // Example feature
+
     VkDeviceCreateInfo createInfo = {};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+
     createInfo.pQueueCreateInfos = &queueCreateInfo;
     createInfo.queueCreateInfoCount = 1;
 
-    if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS) {
-        throw VulkanError("Failed to create logical device");
+    createInfo.pEnabledFeatures = &deviceFeatures;
+
+    // Enable necessary device extensions
+    std::vector<const char*> deviceExtensions = {
+        // Add required device extensions here, e.g., "VK_KHR_swapchain" if needed
+    };
+    createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+    createInfo.ppEnabledExtensionNames = deviceExtensions.data();
+
+    // Optional: Enable validation layers (if not already enabled at instance level)
+    std::vector<const char*> validationLayers = {
+        "VK_LAYER_KHRONOS_validation"
+    };
+#ifndef NDEBUG
+    createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
+    createInfo.ppEnabledLayerNames = validationLayers.data();
+#else
+    createInfo.enabledLayerCount = 0;
+#endif
+
+    VkResult result = vkCreateDevice(physicalDevice, &createInfo, nullptr, &device);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create logical device.");
     }
 
+    // Retrieve the compute queue
     vkGetDeviceQueue(device, computeQueueFamilyIndex, 0, &computeQueue);
-    spdlog::info("Logical device created and compute queue retrieved.");
-}
-
-void VulkanContext::findComputeQueueFamily() {
-    uint32_t queueFamilyCount = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
-    std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
-    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
-
-    for (uint32_t i = 0; i < queueFamilyCount; i++) {
-        if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-            computeQueueFamilyIndex = i;
-            return;
-        }
+    if (computeQueue == VK_NULL_HANDLE) {
+        throw std::runtime_error("Failed to retrieve compute queue.");
     }
-    throw VulkanError("Failed to find a compute queue family");
+
+    spdlog::info("Compute queue retrieved successfully.");
 }
 
 // src\VulkanMemoryManager.cpp
@@ -911,6 +1094,7 @@ VkFence ScopedGPUWait::get() const {
     return fence;
 }
 // src\vulkan_backend_bindings.cpp
+// src\vulkan_backend_bindings.cpp
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -927,10 +1111,37 @@ namespace py = pybind11;
 PYBIND11_MODULE(vulkan_backend, m) {
     m.doc() = "Vulkan Backend for PyTorch Operations";
 
-    // Initialize Vulkan Context if not already initialized
-    if (!vulkan_globals::getContext()) {
-        vulkan_globals::initializeVulkan();
-    }
+    // Initialize with proper shader path discovery
+    m.def("init_vulkan", []() -> bool {
+        try {
+            // Get the path to the current module
+            auto module = py::module::import("__main__");
+            auto module_path = std::filesystem::path(module.attr("__file__").cast<std::string>());
+            
+            // Initialize shader directory based on module location
+            vulkan_globals::setShaderDirectory(module_path);
+            
+            bool success = vulkan_globals::initializeVulkan();
+            if (success && vulkan_globals::getContext()) {
+                vulkan_globals::device = vulkan_globals::getContext()->getDevice();
+                return true;
+            }
+            return false;
+        }
+        catch (const std::exception& e) {
+            spdlog::error("Failed to initialize Vulkan: {}", e.what());
+            return false;
+        }
+    }, "Initialize Vulkan context");
+
+    m.def("cleanup_vulkan", []() -> void {
+        vulkan_globals::cleanupVulkan();
+        vulkan_globals::device = VK_NULL_HANDLE;
+    }, "Cleanup Vulkan context");
+
+    m.def("is_vulkan_initialized", []() -> bool {
+        return vulkan_globals::getContext() != nullptr && vulkan_globals::device != VK_NULL_HANDLE;
+    }, "Check if Vulkan context is initialized");
 
     // Import ONNX model
     m.def("import_onnx_model", [](const std::string& modelPath) -> void {
@@ -946,6 +1157,11 @@ PYBIND11_MODULE(vulkan_backend, m) {
     // Add Operation
     m.def("vulkan_add", [](py::array_t<float> inputA, py::array_t<float> inputB, py::array_t<float> output) {
         try {
+            // Ensure Vulkan is initialized
+            if (!vulkan_globals::getContext() || vulkan_globals::device == VK_NULL_HANDLE) {
+                throw std::runtime_error("Vulkan is not initialized. Call init_vulkan() first.");
+            }
+
             // Ensure input arrays are contiguous
             if (!(inputA.flags() & py::array::c_style)) {
                 throw std::runtime_error("Input A must be a contiguous array.");
@@ -1009,6 +1225,11 @@ PYBIND11_MODULE(vulkan_backend, m) {
     m.def("vulkan_matmul", [](py::array_t<float> inputA, py::array_t<float> inputB, py::array_t<float> output,
                             uint32_t M, uint32_t K, uint32_t N) {
         try {
+            // Ensure Vulkan is initialized
+            if (!vulkan_globals::getContext() || vulkan_globals::device == VK_NULL_HANDLE) {
+                throw std::runtime_error("Vulkan is not initialized. Call init_vulkan() first.");
+            }
+
             // Ensure input arrays are contiguous
             if (!(inputA.flags() & py::array::c_style)) {
                 throw std::runtime_error("Input A must be a contiguous array.");
@@ -1084,6 +1305,11 @@ PYBIND11_MODULE(vulkan_backend, m) {
     // ReLU operation
     m.def("vulkan_relu", [](py::array_t<float> input, py::array_t<float> output) {
         try {
+            // Ensure Vulkan is initialized
+            if (!vulkan_globals::getContext() || vulkan_globals::device == VK_NULL_HANDLE) {
+                throw std::runtime_error("Vulkan is not initialized. Call init_vulkan() first.");
+            }
+
             // Ensure input arrays are contiguous
             if (!(input.flags() & py::array::c_style)) {
                 throw std::runtime_error("Input must be a contiguous array.");
@@ -1134,6 +1360,11 @@ PYBIND11_MODULE(vulkan_backend, m) {
     // Sigmoid operation
     m.def("vulkan_sigmoid", [](py::array_t<float> input, py::array_t<float> output) {
         try {
+            // Ensure Vulkan is initialized
+            if (!vulkan_globals::getContext() || vulkan_globals::device == VK_NULL_HANDLE) {
+                throw std::runtime_error("Vulkan is not initialized. Call init_vulkan() first.");
+            }
+
             // Ensure input arrays are contiguous
             if (!(input.flags() & py::array::c_style)) {
                 throw std::runtime_error("Input must be a contiguous array.");
@@ -1184,6 +1415,11 @@ PYBIND11_MODULE(vulkan_backend, m) {
     // Softmax operation
     m.def("vulkan_softmax", [](py::array_t<float> input, py::array_t<float> output) {
         try {
+            // Ensure Vulkan is initialized
+            if (!vulkan_globals::getContext() || vulkan_globals::device == VK_NULL_HANDLE) {
+                throw std::runtime_error("Vulkan is not initialized. Call init_vulkan() first.");
+            }
+
             // Ensure input arrays are contiguous
             if (!(input.flags() & py::array::c_style)) {
                 throw std::runtime_error("Input must be a contiguous array.");
@@ -1231,7 +1467,7 @@ PYBIND11_MODULE(vulkan_backend, m) {
         }
     }, "Execute Softmax operation on Vulkan backend");
 
-// Conv2D operation
+    // Conv2D operation
     m.def("vulkan_conv2d", [](
         py::array_t<float> input,
         py::array_t<float> kernel,
@@ -1244,6 +1480,11 @@ PYBIND11_MODULE(vulkan_backend, m) {
         uint32_t padding,
         uint32_t stride) {
         try {
+            // Ensure Vulkan is initialized
+            if (!vulkan_globals::getContext() || vulkan_globals::device == VK_NULL_HANDLE) {
+                throw std::runtime_error("Vulkan is not initialized. Call init_vulkan() first.");
+            }
+
             // Ensure input arrays are contiguous
             if (!(input.flags() & py::array::c_style)) {
                 throw std::runtime_error("Input must be a contiguous array.");
@@ -1371,6 +1612,11 @@ PYBIND11_MODULE(vulkan_backend, m) {
                               uint32_t poolSizeX, uint32_t poolSizeY,
                               uint32_t strideX, uint32_t strideY) {
         try {
+            // Ensure Vulkan is initialized
+            if (!vulkan_globals::getContext() || vulkan_globals::device == VK_NULL_HANDLE) {
+                throw std::runtime_error("Vulkan is not initialized. Call init_vulkan() first.");
+            }
+
             // Ensure input arrays are contiguous
             if (!(input.flags() & py::array::c_style)) {
                 throw std::runtime_error("Input must be a contiguous array.");
@@ -1447,6 +1693,11 @@ PYBIND11_MODULE(vulkan_backend, m) {
         uint32_t size,
         float epsilon) {
         try {
+            // Ensure Vulkan is initialized
+            if (!vulkan_globals::getContext() || vulkan_globals::device == VK_NULL_HANDLE) {
+                throw std::runtime_error("Vulkan is not initialized. Call init_vulkan() first.");
+            }
+
             // Ensure input arrays are contiguous
             if (!(input.flags() & py::array::c_style)) {
                 throw std::runtime_error("Input must be a contiguous array.");
@@ -1540,12 +1791,15 @@ PYBIND11_MODULE(vulkan_backend, m) {
         throw std::runtime_error("Gradient checkpointing not yet implemented.");
     }, "Enable gradient checkpointing");
 }
+
 // src\vulkan_globals.cpp
 #include "vulkan_globals.h"
+#include "VulkanContext.h"
 #include "spdlog/spdlog.h"
+#include <filesystem>
 
-// Global Vulkan objects
 namespace vulkan_globals {
+    // Define global Vulkan variables
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
@@ -1554,34 +1808,72 @@ namespace vulkan_globals {
     VkCommandPool commandPool = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
 
+    // Initialize shader directory
+    std::filesystem::path vulkan_globals::shader_directory;
+
+    // Vulkan context instance
     std::unique_ptr<VulkanContext> vulkanContextInstance = nullptr;
 
+    void setShaderDirectory(const std::filesystem::path& exe_path) {
+        // Get the directory containing the executable
+        auto base_path = exe_path.parent_path();
+        
+        // Try different relative paths to find shaders
+        std::vector<std::filesystem::path> potential_paths = {
+            base_path / "shaders",                    // Direct shaders subdirectory
+            base_path / ".." / "shaders",             // One level up
+            base_path / ".." / ".." / "shaders",      // Two levels up
+            base_path / ".." / ".." / ".." / "shaders" // Three levels up
+        };
+
+        for (const auto& path : potential_paths) {
+            if (std::filesystem::exists(path) && 
+                std::filesystem::exists(path / "add.comp.spv")) {
+                shader_directory = path;
+                spdlog::info("Found shader directory at: {}", shader_directory.string());
+                return;
+            }
+        }
+
+        spdlog::error("Could not find valid shader directory in any of the searched locations");
+        for (const auto& path : potential_paths) {
+            spdlog::error("Searched: {}", path.string());
+        }
+        throw std::runtime_error("Could not find valid shader directory");
+    }
+
+    // Initialize Vulkan
     bool initializeVulkan() {
         try {
             if (!vulkanContextInstance) {
-                spdlog::info("Initializing VulkanContext...");
+                spdlog::info("Creating VulkanContext instance...");
                 vulkanContextInstance = std::make_unique<VulkanContext>();
                 vulkanContextInstance->initVulkan();
+            } else {
+                spdlog::warn("VulkanContext is already initialized.");
             }
-            spdlog::info("VulkanContext initialized successfully.");
             return true;
-        } catch (const std::exception& e) {
-            spdlog::error("Failed to initialize VulkanContext: {}", e.what());
+        }
+        catch (const std::exception& e) {
+            spdlog::error("Failed to initialize Vulkan: {}", e.what());
             return false;
         }
     }
 
+    // Cleanup Vulkan
     void cleanupVulkan() {
         if (vulkanContextInstance) {
             spdlog::info("Cleaning up VulkanContext...");
             vulkanContextInstance->cleanupVulkan();
             vulkanContextInstance.reset();
             spdlog::info("VulkanContext cleanup complete.");
+        } else {
+            spdlog::warn("VulkanContext is not initialized or already cleaned up.");
         }
     }
 
+    // Get VulkanContext instance
     VulkanContext* getContext() {
         return vulkanContextInstance.get();
     }
 }
-

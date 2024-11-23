@@ -15,15 +15,27 @@ namespace py = pybind11;
 PYBIND11_MODULE(vulkan_backend, m) {
     m.doc() = "Vulkan Backend for PyTorch Operations";
 
-    // Expose initialization and cleanup functions
+    // Initialize with proper shader path discovery
     m.def("init_vulkan", []() -> bool {
-        bool success = vulkan_globals::initializeVulkan();
-        if (success && vulkan_globals::getContext()) {
-            // Assign the device from VulkanContext to the global device variable
-            vulkan_globals::device = vulkan_globals::getContext()->getDevice();
-            return true;
+        try {
+            // Get the path to the current module
+            auto module = py::module::import("__main__");
+            auto module_path = std::filesystem::path(module.attr("__file__").cast<std::string>());
+            
+            // Initialize shader directory based on module location
+            vulkan_globals::setShaderDirectory(module_path);
+            
+            bool success = vulkan_globals::initializeVulkan();
+            if (success && vulkan_globals::getContext()) {
+                vulkan_globals::device = vulkan_globals::getContext()->getDevice();
+                return true;
+            }
+            return false;
         }
-        return false;
+        catch (const std::exception& e) {
+            spdlog::error("Failed to initialize Vulkan: {}", e.what());
+            return false;
+        }
     }, "Initialize Vulkan context");
 
     m.def("cleanup_vulkan", []() -> void {
