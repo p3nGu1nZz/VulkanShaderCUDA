@@ -14,7 +14,7 @@ namespace vulkan_globals {
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
 
     // Initialize shader directory
-    std::filesystem::path vulkan_globals::shader_directory;
+    std::filesystem::path shader_directory;
 
     // Vulkan context instance
     std::unique_ptr<VulkanContext> vulkanContextInstance = nullptr;
@@ -22,18 +22,20 @@ namespace vulkan_globals {
     void setShaderDirectory(const std::filesystem::path& exe_path) {
         // Get the directory containing the executable
         auto base_path = exe_path.parent_path();
-        
-        // Try different relative paths to find shaders
+
+        // Potential shader paths
         std::vector<std::filesystem::path> potential_paths = {
             base_path / "shaders",                    // Direct shaders subdirectory
+            base_path / "VulkanShaderCUDA" / "shaders", // In project directory
             base_path / ".." / "shaders",             // One level up
+            base_path / ".." / "VulkanShaderCUDA" / "shaders", // One level up in project directory
             base_path / ".." / ".." / "shaders",      // Two levels up
-            base_path / ".." / ".." / ".." / "shaders" // Three levels up
+            base_path / ".." / ".." / "VulkanShaderCUDA" / "shaders", // Two levels up in project directory
         };
 
         for (const auto& path : potential_paths) {
             if (std::filesystem::exists(path) && 
-                std::filesystem::exists(path / "add.comp.spv")) {
+                std::filesystem::exists(path / "add.comp.spv")) { // Check for a key shader file
                 shader_directory = path;
                 spdlog::info("Found shader directory at: {}", shader_directory.string());
                 return;
@@ -44,6 +46,8 @@ namespace vulkan_globals {
         for (const auto& path : potential_paths) {
             spdlog::error("Searched: {}", path.string());
         }
+
+        // Throw exception if shader directory not found
         throw std::runtime_error("Could not find valid shader directory");
     }
 
@@ -54,6 +58,7 @@ namespace vulkan_globals {
                 spdlog::info("Creating VulkanContext instance...");
                 vulkanContextInstance = std::make_unique<VulkanContext>();
                 vulkanContextInstance->initVulkan();
+                spdlog::info("VulkanContext initialized successfully.");
             } else {
                 spdlog::warn("VulkanContext is already initialized.");
             }

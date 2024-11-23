@@ -46,7 +46,7 @@ namespace VulkanSync {
 
             VkResult result = vkCreateFence(deviceRef, &fenceInfo, nullptr, &fence);
             if (result != VK_SUCCESS) {
-                throw VulkanError("Failed to create fence during ScopedGPUWait.");
+                throw std::runtime_error("Failed to create fence during ScopedGPUWait.");
             }
         }
 
@@ -61,7 +61,7 @@ namespace VulkanSync {
         void wait() const {
             VkResult result = vkWaitForFences(deviceRef, 1, &fence, VK_TRUE, UINT64_MAX);
             if (result != VK_SUCCESS) {
-                throw VulkanError("Failed to wait for fence in ScopedGPUWait.");
+                throw std::runtime_error("Failed to wait for fence in ScopedGPUWait.");
             }
         }
 
@@ -80,6 +80,11 @@ private:
     VkDevice deviceRef;                             // Vulkan device reference
 
 public:
+    // Default constructor for pybind11
+    VulkanTensor()
+        : allocation{nullptr, 0, 0}, dimensions{0, 0, 0, 0, TensorLayout::Layout::LINEAR},
+          buffer(VK_NULL_HANDLE), bufferPoolPtr(nullptr), deviceRef(vulkan_globals::device) {}
+
     VulkanTensor(VulkanMemoryManager* memoryManager, 
                  VulkanBufferPool* bufferPool, 
                  VkDeviceSize size,
@@ -94,7 +99,7 @@ public:
         , deviceRef(vulkan_globals::device) {
         
         if (deviceRef == VK_NULL_HANDLE) {
-            throw VulkanError("Vulkan device not initialized.");
+            throw std::runtime_error("Vulkan device not initialized.");
         }
 
         // Allocate memory
@@ -114,14 +119,14 @@ public:
 
         VkResult result = vkCreateBuffer(deviceRef, &bufferInfo, nullptr, &buffer);
         if (result != VK_SUCCESS) {
-            throw VulkanError("Failed to create buffer in VulkanTensor.");
+            throw std::runtime_error("Failed to create buffer in VulkanTensor.");
         }
 
         // Bind buffer memory
         result = vkBindBufferMemory(deviceRef, buffer, allocation.memory, allocation.offset);
         if (result != VK_SUCCESS) {
             vkDestroyBuffer(deviceRef, buffer, nullptr);
-            throw VulkanError("Failed to bind buffer memory in VulkanTensor.");
+            throw std::runtime_error("Failed to bind buffer memory in VulkanTensor.");
         }
 
         // Upload data if provided
@@ -176,7 +181,7 @@ public:
         void* mappedMemory;
         VkResult result = vkMapMemory(deviceRef, allocation.memory, allocation.offset, allocation.size, 0, &mappedMemory);
         if (result != VK_SUCCESS) {
-            throw VulkanError("Failed to map memory for upload in VulkanTensor.");
+            throw std::runtime_error("Failed to map memory for upload in VulkanTensor.");
         }
 
         memcpy(mappedMemory, data, static_cast<size_t>(allocation.size));
@@ -200,7 +205,7 @@ public:
         void* mappedMemory;
         VkResult result = vkMapMemory(deviceRef, allocation.memory, allocation.offset, allocation.size, 0, &mappedMemory);
         if (result != VK_SUCCESS) {
-            throw VulkanError("Failed to map memory for download in VulkanTensor.");
+            throw std::runtime_error("Failed to map memory for download in VulkanTensor.");
         }
 
         VkMappedMemoryRange memoryRange = {};
@@ -214,16 +219,20 @@ public:
         vkUnmapMemory(deviceRef, allocation.memory);
     }
 
-    // Convert tensor layout
-    void convertLayout(TensorLayout::Layout newLayout, CommandBufferManager& cmdManager, PipelineManager& pipelineManager);
-
     // Getters
-    VkDeviceSize getSize() const { return allocation.size; }
+    uint32_t getN() const { return dimensions.n; }
+    uint32_t getC() const { return dimensions.c; }
+    uint32_t getH() const { return dimensions.h; }
+    uint32_t getW() const { return dimensions.w; }
     uint32_t getWidth() const { return dimensions.w; }
     uint32_t getHeight() const { return dimensions.h; }
     uint32_t getChannels() const { return dimensions.c; }
-    uint32_t getDepth() const { return dimensions.n; }
+    VkDeviceSize getSize() const { return allocation.size; }
     VkBuffer getBuffer() const { return buffer; }
+
+    // Layout Getters and Setters
+    TensorLayout::Layout getLayout() const { return dimensions.layout; }
+    void setLayout(TensorLayout::Layout newLayout) { dimensions.layout = newLayout; }
 
     // Utility methods
     bool isValid() const {

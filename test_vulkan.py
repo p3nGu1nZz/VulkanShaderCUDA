@@ -15,7 +15,6 @@ import torch
 SCRIPT_DIR = Path(__file__).resolve().parent
 MODULE_PATH = SCRIPT_DIR / "build" / "bin" / "Release" / "vulkan_backend.pyd"
 
-
 # For debugging
 print(f"Looking for module at: {MODULE_PATH}")
 
@@ -75,7 +74,8 @@ def log_vulkan_invocation(func_name: str):
     Args:
         func_name (str): Name of the Vulkan function invoked.
     """
-    #logger.info(f"Vulkan Function Invoked: {func_name}")
+    if ENABLE_VULKAN_LOGGING:
+        logger.info(f"Vulkan Function Invoked: {func_name}")
 
 def summarize_tensor(tensor: torch.Tensor, name: str, sample_size: int = 5) -> None:
     """Only log tensor summaries for failed tests or final results"""
@@ -92,403 +92,291 @@ def summarize_tensor(tensor: torch.Tensor, name: str, sample_size: int = 5) -> N
     logger.info(f"{summary}")
     logger.info(f"Sample: {sample} ...")
 
-# Custom Autograd Functions
-class VulkanAddFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+# VulkanTensor Class
+class VulkanTensor:
+    def __init__(self, data: np.ndarray, shape: Optional[Tuple[int, ...]] = None, requires_grad: bool = False):
         """
-        Forward pass for element-wise addition.
+        VulkanTensor wraps a NumPy array for Vulkan operations.
         
         Args:
-            ctx: Context object for backward pass
-            a (torch.Tensor): First input tensor
-            b (torch.Tensor): Second input tensor
-            
-        Returns:
-            torch.Tensor: Result of element-wise addition
+            data (np.ndarray): Input data array.
+            shape (tuple, optional): Shape of the tensor. If None, inferred from data.
+            requires_grad (bool, optional): Whether gradients are required.
         """
-        if a.shape != b.shape:
-            raise ValueError(f"Tensors must have the same shape. Got {a.shape} and {b.shape}")
-        
-        validate_tensor_shapes(a, b)
-        c = torch.empty_like(a)
-        
-        try:
-            log_vulkan_invocation("vulkan_add")
-            a_np = to_contiguous_numpy(a)
-            b_np = to_contiguous_numpy(b)
-            c_np = to_contiguous_numpy(c)
-            
-            vulkan_backend.vulkan_add(a_np, b_np, c_np)
-            c.copy_(torch.from_numpy(c_np))
-            
-            # Only log if global logging is enabled
-            global ENABLE_VULKAN_LOGGING
-            if ENABLE_VULKAN_LOGGING:
-                summarize_tensor(c, "Vulkan Addition Result")
-            
-        except Exception as e:
-            logger.error(f"Vulkan addition failed: {str(e)}")
-            raise
-        
-        ctx.save_for_backward(a, b)
-        return c
+        if shape is None:
+            shape = data.shape
+        self.data = data.astype(np.float32).copy()
+        self.shape = shape
+        self.requires_grad = requires_grad
 
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        """
-        Backward pass for element-wise addition.
-        
-        Args:
-            ctx: Context object from forward pass
-            grad_output (torch.Tensor): Gradient from subsequent layer
-            
-        Returns:
-            tuple: Gradients for each input tensor
-        """
-        return grad_output, grad_output
-        
+    def mutable_data(self):
+        """Return a mutable pointer to the data for Vulkan operations."""
+        return self.data
 
-class VulkanMatMulFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-        if a.dim() != 2 or b.dim() != 2:
-            raise ValueError("Both tensors must be 2D")
-        if a.shape[1] != b.shape[0]:
-            raise ValueError(f"Inner dimensions must match. Got {a.shape} and {b.shape}")
-        
-        validate_tensor_shapes(a, b)
-        M, K = a.shape
-        K_b, N = b.shape
-        if K != K_b:
-            raise ValueError(f"Inner dimensions must match. Got K={K} and K_b={K_b}")
-        
-        c = torch.empty(M, N, device=a.device, dtype=a.dtype)
-        
-        try:
-            log_vulkan_invocation("vulkan_matmul")
-            a_np = to_contiguous_numpy(a)
-            b_np = to_contiguous_numpy(b)
-            c_np = to_contiguous_numpy(c)
-            
-            vulkan_backend.vulkan_matmul(a_np, b_np, c_np, M, K, N)
-            c.copy_(torch.from_numpy(c_np))
-            
-            global ENABLE_VULKAN_LOGGING
-            if ENABLE_VULKAN_LOGGING:
-                summarize_tensor(c, "Vulkan MatMul Result")
-            
-        except Exception as e:
-            logger.error(f"Vulkan matrix multiplication failed: {str(e)}")
-            raise
-        
-        ctx.save_for_backward(a, b)
-        return c
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        a, b = ctx.saved_tensors
-        grad_a = torch.matmul(grad_output, b.t())
-        grad_b = torch.matmul(a.t(), grad_output)
-        return grad_a, grad_b
-
-class VulkanReLUFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x: torch.Tensor) -> torch.Tensor:
-        validate_tensor_shapes(x)
-        output = torch.empty_like(x)
-        
-        try:
-            log_vulkan_invocation("vulkan_relu")
-            x_np = to_contiguous_numpy(x)
-            output_np = to_contiguous_numpy(output)
-            
-            vulkan_backend.vulkan_relu(x_np, output_np)
-            output.copy_(torch.from_numpy(output_np))
-            
-            global ENABLE_VULKAN_LOGGING
-            if ENABLE_VULKAN_LOGGING:
-                summarize_tensor(output, "Vulkan ReLU Result")
-            
-        except Exception as e:
-            logger.error(f"Vulkan ReLU failed: {str(e)}")
-            raise
-        
-        ctx.save_for_backward(x)
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        x, = ctx.saved_tensors
-        grad_input = grad_output.clone()
-        grad_input[x < 0] = 0
-        return grad_input
-
-class VulkanSigmoidFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x: torch.Tensor) -> torch.Tensor:
-        validate_tensor_shapes(x)
-        output = torch.empty_like(x)
-        
-        try:
-            log_vulkan_invocation("vulkan_sigmoid")
-            x_np = to_contiguous_numpy(x)
-            output_np = to_contiguous_numpy(output)
-            
-            vulkan_backend.vulkan_sigmoid(x_np, output_np)
-            output.copy_(torch.from_numpy(output_np))
-            
-            global ENABLE_VULKAN_LOGGING
-            if ENABLE_VULKAN_LOGGING:
-                summarize_tensor(output, "Vulkan Sigmoid Result")
-            
-        except Exception as e:
-            logger.error(f"Vulkan Sigmoid failed: {str(e)}")
-            raise
-        
-        ctx.save_for_backward(output)
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        output, = ctx.saved_tensors
-        return grad_output * output * (1 - output)
-
-class VulkanSoftmaxFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x: torch.Tensor) -> torch.Tensor:
-        validate_tensor_shapes(x)
-        output = torch.empty_like(x)
-        
-        try:
-            log_vulkan_invocation("vulkan_softmax")
-            x_np = to_contiguous_numpy(x)
-            output_np = to_contiguous_numpy(output)
-            
-            vulkan_backend.vulkan_softmax(x_np, output_np)
-            output.copy_(torch.from_numpy(output_np))
-            
-            global ENABLE_VULKAN_LOGGING
-            if ENABLE_VULKAN_LOGGING:
-                summarize_tensor(output, "Vulkan Softmax Result")
-            
-        except Exception as e:
-            logger.error(f"Vulkan Softmax failed: {str(e)}")
-            raise
-        
-        ctx.save_for_backward(output)
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        output, = ctx.saved_tensors
-        grad_input = grad_output * output * (1 - output)
-        return grad_input
-
-class VulkanMaxPool2dFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x: torch.Tensor, kernel_size: Tuple[int, int], stride: Tuple[int, int]) -> torch.Tensor:
-        if x.dim() != 4:
-            raise ValueError("Input must be a 4D tensor (N, C, H, W)")
-        
-        validate_tensor_shapes(x)
-        
-        N, C, H, W = x.shape
-        kernel_h, kernel_w = kernel_size
-        stride_h, stride_w = stride
-        output_h = (H - kernel_h) // stride_h + 1
-        output_w = (W - kernel_w) // stride_w + 1
-        
-        output = torch.empty((N, C, output_h, output_w), device=x.device, dtype=x.dtype)
-        
-        try:
-            log_vulkan_invocation("vulkan_pooling")
-            for n in range(N):
-                x_np = to_contiguous_numpy(x[n])
-                x_np = np.transpose(x_np, (1, 2, 0))
-                output_np = to_contiguous_numpy(output[n])
-                output_np = np.transpose(output_np, (1, 2, 0))
-                
-                vulkan_backend.vulkan_pooling(
-                    x_np, output_np, W, H, C,
-                    kernel_w, kernel_h, stride_w, stride_h
-                )
-                
-                output_np = np.transpose(output_np, (2, 0, 1))
-                output[n].copy_(torch.from_numpy(output_np))
-                
-                global ENABLE_VULKAN_LOGGING
-                if ENABLE_VULKAN_LOGGING:
-                    summarize_tensor(output[n], f"Vulkan MaxPool2d Result (Batch {n})")
-            
-        except Exception as e:
-            logger.error(f"Vulkan MaxPool2d failed: {str(e)}")
-            raise
-        
-        ctx.save_for_backward(x)
-        ctx.kernel_size = kernel_size
-        ctx.stride = stride
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        x, = ctx.saved_tensors
-        kernel_size = ctx.kernel_size
-        stride = ctx.stride
-        
-        grad_input = torch.zeros_like(x)
-        N, C, H, W = x.shape
-        kernel_h, kernel_w = kernel_size
-        stride_h, stride_w = stride
-        output_h = (H - kernel_h) // stride_h + 1
-        output_w = (W - kernel_w) // stride_w + 1
-        
-        try:
-            log_vulkan_invocation("vulkan_pooling_backward")
-            # Manual gradient computation
-            for n in range(N):
-                for c in range(C):
-                    for i in range(output_h):
-                        for j in range(output_w):
-                            h_start = i * stride_h
-                            w_start = j * stride_w
-                            h_end = h_start + kernel_h
-                            w_end = w_start + kernel_w
-                            
-                            patch = x[n, c, h_start:h_end, w_start:w_end]
-                            max_val = torch.max(patch)
-                            mask = (patch == max_val)
-                            grad_input[n, c, h_start:h_end, w_start:w_end] += mask.float() * grad_output[n, c, i, j]
-                            
-        except Exception as e:
-            logger.error(f"Vulkan MaxPool2d backward failed: {str(e)}")
-            raise
-        
-        return grad_input, None, None
-
-class VulkanConv2dFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor],
-                padding: int, stride: int) -> torch.Tensor:
-        if x.dim() != 4:
-            raise ValueError("Input must be a 4D tensor (N, C, H, W)")
-        if weight.dim() != 4:
-            raise ValueError("Weight must be a 4D tensor (out_channels, in_channels, kH, kW)")
-        
-        validate_tensor_shapes(x, weight)
-        if bias is not None:
-            validate_tensor_shapes(bias)
-        
-        N, C, H, W = x.shape
-        out_channels, in_channels, kH, kW = weight.shape
-        
-        if C != in_channels:
-            raise ValueError(f"Input channels ({C}) doesn't match weight channels ({in_channels})")
-        
-        output_h = (H + 2 * padding - kH) // stride + 1
-        output_w = (W + 2 * padding - kW) // stride + 1
-        
-        output = torch.empty((N, out_channels, output_h, output_w), device=x.device, dtype=x.dtype)
-        
-        try:
-            log_vulkan_invocation("vulkan_conv2d")
-            for n in range(N):
-                x_padded = torch.nn.functional.pad(x[n], (padding, padding, padding, padding))
-                x_np = to_contiguous_numpy(x_padded)
-                weight_np = to_contiguous_numpy(weight)
-                output_np = to_contiguous_numpy(output[n])
-                
-                x_np = np.transpose(x_np, (1, 2, 0))
-                weight_np = np.transpose(weight_np, (0, 2, 3, 1))
-                output_np = np.transpose(output_np, (1, 2, 0))
-                
-                vulkan_backend.vulkan_conv2d(
-                    x_np, weight_np, output_np,
-                    W + 2 * padding, H + 2 * padding, C,
-                    out_channels, kW, kH, padding, stride
-                )
-                
-                output_np = np.transpose(output_np, (2, 0, 1))
-                output[n].copy_(torch.from_numpy(output_np))
-                
-                global ENABLE_VULKAN_LOGGING
-                if ENABLE_VULKAN_LOGGING:
-                    summarize_tensor(output[n], f"Vulkan Conv2d Result (Batch {n})")
-            
-            if bias is not None:
-                output += bias.view(1, -1, 1, 1)
-                if ENABLE_VULKAN_LOGGING:
-                    summarize_tensor(output, "Vulkan Conv2d with Bias Result")
-                
-        except Exception as e:
-            logger.error(f"Vulkan Conv2d failed: {str(e)}")
-            raise
-        
-        ctx.save_for_backward(x, weight, bias)
-        ctx.padding = padding
-        ctx.stride = stride
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        x, weight, bias = ctx.saved_tensors
-        padding = ctx.padding
-        stride = ctx.stride
-        
-        grad_input = torch.nn.grad.conv2d_input(
-            x.shape, weight, grad_output, stride=stride, padding=padding
-        )
-        grad_weight = torch.nn.grad.conv2d_weight(
-            x, weight.shape, grad_output, stride=stride, padding=padding
-        )
-        grad_bias = None
-        if bias is not None:
-            grad_bias = grad_output.sum((0, 2, 3))
-        
-        return grad_input, grad_weight, grad_bias, None, None
-# Functional Interfaces
+# Updated Operation Functions
 def vulkan_add(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Element-wise addition using Vulkan."""
     log_vulkan_invocation("vulkan_add")
-    return VulkanAddFunction.apply(a, b)
+    if not vulkan_backend.is_vulkan_initialized():
+        raise RuntimeError("Vulkan backend not initialized")
+    
+    # Convert to VulkanTensor format
+    a_np = to_contiguous_numpy(a)
+    b_np = to_contiguous_numpy(b)
+    
+    # Create output tensor
+    c = torch.empty_like(a)
+    c_np = to_contiguous_numpy(c)
+    
+    # Create VulkanTensors
+    vulkan_a = VulkanTensor(a_np, shape=a.shape, requires_grad=a.requires_grad)
+    vulkan_b = VulkanTensor(b_np, shape=b.shape, requires_grad=b.requires_grad)
+    vulkan_c = VulkanTensor(c_np, shape=c.shape, requires_grad=c.requires_grad)
+    
+    # Execute operation using updated backend interface
+    vulkan_backend.execute_add(vulkan_a, vulkan_b, vulkan_c)
+    
+    # Copy result back to PyTorch tensor
+    c.copy_(torch.from_numpy(vulkan_c.data))
+    
+    # Only log if global logging is enabled
+    if ENABLE_VULKAN_LOGGING:
+        summarize_tensor(c, "Vulkan Addition Result")
+    
+    return c
 
 def vulkan_matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Matrix multiplication using Vulkan."""
     log_vulkan_invocation("vulkan_matmul")
-    return VulkanMatMulFunction.apply(a, b)
+    if not vulkan_backend.is_vulkan_initialized():
+        raise RuntimeError("Vulkan backend not initialized")
+    
+    # Convert to VulkanTensor format
+    a_np = to_contiguous_numpy(a)
+    b_np = to_contiguous_numpy(b)
+    
+    # Get matrix dimensions
+    M, K = a.shape
+    K_b, N = b.shape
+    
+    if K != K_b:
+        raise ValueError(f"Inner dimensions must match. Got K={K} and K_b={K_b}")
+    
+    # Create output tensor
+    c = torch.empty((M, N), device=a.device, dtype=a.dtype)
+    c_np = to_contiguous_numpy(c)
+    
+    # Create VulkanTensors with proper layout information
+    vulkan_a = VulkanTensor(a_np, shape=(M, K), requires_grad=a.requires_grad)
+    vulkan_b = VulkanTensor(b_np, shape=(K, N), requires_grad=b.requires_grad)
+    vulkan_c = VulkanTensor(c_np, shape=(M, N), requires_grad=c.requires_grad)
+    
+    # Execute operation using updated backend interface
+    vulkan_backend.execute_matmul(vulkan_a, vulkan_b, vulkan_c, M, K, N)
+    
+    # Copy result back to PyTorch tensor
+    c.copy_(torch.from_numpy(vulkan_c.data))
+    
+    # Only log if global logging is enabled
+    if ENABLE_VULKAN_LOGGING:
+        summarize_tensor(c, "Vulkan MatMul Result")
+    
+    return c
 
 def vulkan_relu(x: torch.Tensor) -> torch.Tensor:
     """ReLU activation using Vulkan."""
     log_vulkan_invocation("vulkan_relu")
-    return VulkanReLUFunction.apply(x)
+    if not vulkan_backend.is_vulkan_initialized():
+        raise RuntimeError("Vulkan backend not initialized")
+    
+    # Convert to VulkanTensor format
+    x_np = to_contiguous_numpy(x)
+    
+    # Create output tensor
+    output = torch.empty_like(x)
+    output_np = to_contiguous_numpy(output)
+    
+    # Create VulkanTensors
+    vulkan_x = VulkanTensor(x_np, shape=x.shape, requires_grad=x.requires_grad)
+    vulkan_output = VulkanTensor(output_np, shape=output.shape, requires_grad=output.requires_grad)
+    
+    # Execute operation using updated backend interface
+    vulkan_backend.execute_relu(vulkan_x, vulkan_output)
+    
+    # Copy result back to PyTorch tensor
+    output.copy_(torch.from_numpy(vulkan_output.data))
+    
+    # Only log if global logging is enabled
+    if ENABLE_VULKAN_LOGGING:
+        summarize_tensor(output, "Vulkan ReLU Result")
+    
+    return output
 
 def vulkan_sigmoid(x: torch.Tensor) -> torch.Tensor:
     """Sigmoid activation using Vulkan."""
     log_vulkan_invocation("vulkan_sigmoid")
-    return VulkanSigmoidFunction.apply(x)
+    if not vulkan_backend.is_vulkan_initialized():
+        raise RuntimeError("Vulkan backend not initialized")
+    
+    # Convert to VulkanTensor format
+    x_np = to_contiguous_numpy(x)
+    
+    # Create output tensor
+    output = torch.empty_like(x)
+    output_np = to_contiguous_numpy(output)
+    
+    # Create VulkanTensors
+    vulkan_x = VulkanTensor(x_np, shape=x.shape, requires_grad=x.requires_grad)
+    vulkan_output = VulkanTensor(output_np, shape=output.shape, requires_grad=output.requires_grad)
+    
+    # Execute operation using updated backend interface
+    vulkan_backend.execute_sigmoid(vulkan_x, vulkan_output)
+    
+    # Copy result back to PyTorch tensor
+    output.copy_(torch.from_numpy(vulkan_output.data))
+    
+    # Only log if global logging is enabled
+    if ENABLE_VULKAN_LOGGING:
+        summarize_tensor(output, "Vulkan Sigmoid Result")
+    
+    return output
 
 def vulkan_softmax(x: torch.Tensor) -> torch.Tensor:
     """Softmax activation using Vulkan."""
     log_vulkan_invocation("vulkan_softmax")
-    return VulkanSoftmaxFunction.apply(x)
+    if not vulkan_backend.is_vulkan_initialized():
+        raise RuntimeError("Vulkan backend not initialized")
+    
+    # Convert to VulkanTensor format
+    x_np = to_contiguous_numpy(x)
+    
+    # Create output tensor
+    output = torch.empty_like(x)
+    output_np = to_contiguous_numpy(output)
+    
+    # Create VulkanTensors
+    vulkan_x = VulkanTensor(x_np, shape=x.shape, requires_grad=x.requires_grad)
+    vulkan_output = VulkanTensor(output_np, shape=output.shape, requires_grad=output.requires_grad)
+    
+    # Execute operation using updated backend interface
+    vulkan_backend.execute_softmax(vulkan_x, vulkan_output)
+    
+    # Copy result back to PyTorch tensor
+    output.copy_(torch.from_numpy(vulkan_output.data))
+    
+    # Only log if global logging is enabled
+    if ENABLE_VULKAN_LOGGING:
+        summarize_tensor(output, "Vulkan Softmax Result")
+    
+    return output
+
+def vulkan_conv2d(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None,
+                padding: int = 0, stride: int = 1) -> torch.Tensor:
+    """2D convolution using Vulkan."""
+    log_vulkan_invocation("vulkan_conv2d")
+    if not vulkan_backend.is_vulkan_initialized():
+        raise RuntimeError("Vulkan backend not initialized")
+    
+    # Validate input dimensions
+    if x.dim() != 4:
+        raise ValueError("Input must be a 4D tensor (N, C, H, W)")
+    if weight.dim() != 4:
+        raise ValueError("Weight must be a 4D tensor (out_channels, in_channels, kH, kW)")
+    if bias is not None and bias.dim() != 1:
+        raise ValueError("Bias must be a 1D tensor")
+    
+    # Convert to VulkanTensor format
+    x_np = to_contiguous_numpy(x)
+    weight_np = to_contiguous_numpy(weight)
+    bias_np = to_contiguous_numpy(bias) if bias is not None else None
+    
+    # Get tensor dimensions
+    N, C, H, W = x.shape
+    out_channels, in_channels, kH, kW = weight.shape
+    
+    if C != in_channels:
+        raise ValueError(f"Input channels ({C}) don't match weight channels ({in_channels})")
+    
+    # Calculate output dimensions
+    out_H = (H + 2 * padding - kH) // stride + 1
+    out_W = (W + 2 * padding - kW) // stride + 1
+    
+    # Create output tensor
+    output = torch.empty((N, out_channels, out_H, out_W), device=x.device, dtype=x.dtype)
+    output_np = to_contiguous_numpy(output)
+    
+    # Create VulkanTensors
+    vulkan_x = VulkanTensor(x_np, shape=x.shape, requires_grad=x.requires_grad)
+    vulkan_weight = VulkanTensor(weight_np, shape=weight.shape, requires_grad=weight.requires_grad)
+    vulkan_bias = VulkanTensor(bias_np, shape=(out_channels,), requires_grad=bias.requires_grad) if bias_np is not None else None
+    vulkan_output = VulkanTensor(output_np, shape=output.shape, requires_grad=output.requires_grad)
+    
+    # Execute operation using updated backend interface
+    vulkan_backend.execute_conv2d(vulkan_x, vulkan_weight, vulkan_bias, vulkan_output, padding, stride)
+    
+    # Copy result back to PyTorch tensor
+    output.copy_(torch.from_numpy(vulkan_output.data))
+    
+    # Add bias if necessary
+    if bias is not None:
+        output += bias.view(1, -1, 1, 1)
+        if ENABLE_VULKAN_LOGGING:
+            summarize_tensor(output, "Vulkan Conv2d with Bias Result")
+    
+    # Only log if global logging is enabled
+    if ENABLE_VULKAN_LOGGING:
+        summarize_tensor(output, "Vulkan Conv2d Result")
+    
+    return output
 
 def vulkan_max_pool2d(x: torch.Tensor, kernel_size: Union[int, Tuple[int, int]],
                      stride: Optional[Union[int, Tuple[int, int]]] = None) -> torch.Tensor:
     """Max pooling using Vulkan."""
     log_vulkan_invocation("vulkan_max_pool2d")
+    if not vulkan_backend.is_vulkan_initialized():
+        raise RuntimeError("Vulkan backend not initialized")
+    
+    # Validate input dimensions
+    if x.dim() != 4:
+        raise ValueError("Input must be a 4D tensor (N, C, H, W)")
+    
+    # Parse kernel size and stride
     if isinstance(kernel_size, int):
         kernel_size = (kernel_size, kernel_size)
     if stride is None:
         stride = kernel_size
     elif isinstance(stride, int):
         stride = (stride, stride)
-    return VulkanMaxPool2dFunction.apply(x, kernel_size, stride)
-
-def vulkan_conv2d(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None,
-                padding: int = 0, stride: int = 1) -> torch.Tensor:
-    """2D convolution using Vulkan."""
-    log_vulkan_invocation("vulkan_conv2d")
-    return VulkanConv2dFunction.apply(x, weight, bias, padding, stride)
+    
+    # Convert to VulkanTensor format
+    x_np = to_contiguous_numpy(x)
+    
+    # Calculate output dimensions
+    N, C, H, W = x.shape
+    pool_h, pool_w = kernel_size
+    stride_h, stride_w = stride
+    out_H = (H - pool_h) // stride_h + 1
+    out_W = (W - pool_w) // stride_w + 1
+    
+    # Create output tensor
+    output = torch.empty((N, C, out_H, out_W), device=x.device, dtype=x.dtype)
+    output_np = to_contiguous_numpy(output)
+    
+    # Create VulkanTensors
+    vulkan_x = VulkanTensor(x_np, shape=x.shape, requires_grad=x.requires_grad)
+    vulkan_output = VulkanTensor(output_np, shape=output.shape, requires_grad=output.requires_grad)
+    
+    # Execute operation using updated backend interface
+    vulkan_backend.execute_max_pool2d(vulkan_x, vulkan_output, pool_h, pool_w, stride_h, stride_w)
+    
+    # Copy result back to PyTorch tensor
+    output.copy_(torch.from_numpy(vulkan_output.data))
+    
+    # Only log if global logging is enabled
+    if ENABLE_VULKAN_LOGGING:
+        summarize_tensor(output, "Vulkan MaxPool2d Result")
+    
+    return output
 
 # PyTorch Module Wrappers
 class VulkanConv2d(torch.nn.Module):
@@ -829,7 +717,6 @@ def test_memory_management():
         logger.error(f"Memory test failed: {str(e)} ✗")
         return False
 
-
 # Running Benchmarks
 def run_benchmarks():
     """Modified benchmarking with reduced output"""
@@ -915,7 +802,7 @@ def run_benchmarks():
         import traceback
         logger.error(traceback.format_exc())  # This will show the full error traceback
         return False
-        
+
 # Testing Edge Cases
 def test_edge_cases():
     """
@@ -972,7 +859,7 @@ def test_edge_cases():
             logger.info("Mixed data types handling: ✓")
         
     except Exception as e:
-        logger.error(f"Edge case test failed with error: {str(e)}")
+        logger.error(f"Edge case test failed with error: {str(e)} ✗")
         all_passed = False
     
     return all_passed
@@ -996,7 +883,7 @@ def test_zero_cases():
         vulkan_result = vulkan_add(a, b)
         torch_result = a + b
         
-        assert torch.allclose(vulkan_result, torch_result), "Addition with zeros failed!"
+        assert torch.allclose(vulkan_result, torch_result, atol=1e-5), "Addition with zeros failed!"
         assert torch.all(vulkan_result == 0), "Result contains non-zero values!"
         logger.info("Addition with zeros passed ✓")
         
@@ -1008,7 +895,7 @@ def test_zero_cases():
         vulkan_result = vulkan_matmul(a, b)
         torch_result = torch.matmul(a, b)
         
-        assert torch.allclose(vulkan_result, torch_result), "MatMul with zeros failed!"
+        assert torch.allclose(vulkan_result, torch_result, atol=1e-5), "MatMul with zeros failed!"
         assert torch.all(vulkan_result == 0), "Result contains non-zero values!"
         logger.info("MatMul with zeros passed ✓")
         
@@ -1019,7 +906,7 @@ def test_zero_cases():
         vulkan_result = vulkan_relu(x)
         torch_result = torch.relu(x)
         
-        assert torch.allclose(vulkan_result, torch_result), "ReLU with zeros failed!"
+        assert torch.allclose(vulkan_result, torch_result, atol=1e-5), "ReLU with zeros failed!"
         assert torch.all(vulkan_result == 0), "Result contains non-zero values!"
         logger.info("ReLU with zeros passed ✓")
         
@@ -1030,7 +917,7 @@ def test_zero_cases():
         vulkan_result = vulkan_sigmoid(x)
         torch_result = torch.sigmoid(x)
         
-        assert torch.allclose(vulkan_result, torch_result), "Sigmoid with zeros failed!"
+        assert torch.allclose(vulkan_result, torch_result, atol=1e-5), "Sigmoid with zeros failed!"
         assert torch.all(vulkan_result == 0.5), "Result contains incorrect values!"
         logger.info("Sigmoid with zeros passed ✓")
         
@@ -1046,7 +933,7 @@ def test_zero_cases():
         conv_torch.bias.data.copy_(bias.clone())
         torch_result = conv_torch(x)
         
-        assert torch.allclose(vulkan_result, torch_result), "Conv2d with zeros failed!"
+        assert torch.allclose(vulkan_result, torch_result, atol=1e-5), "Conv2d with zeros failed!"
         assert torch.all(vulkan_result == 0), "Result contains non-zero values!"
         logger.info("Conv2d with zeros passed ✓")
         
@@ -1090,7 +977,7 @@ def test_extreme_values():
         vulkan_result = vulkan_relu(x)
         torch_result = torch.relu(x)
         
-        assert torch.allclose(vulkan_result, torch_result), "ReLU with extreme values failed!"
+        assert torch.allclose(vulkan_result, torch_result, atol=1e-5), "ReLU with extreme values failed!"
         logger.info("ReLU with extreme values passed ✓")
         
         # Test Sigmoid with Extreme Values

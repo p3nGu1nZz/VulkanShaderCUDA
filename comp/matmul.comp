@@ -11,7 +11,7 @@ layout(std430, binding = 1) readonly buffer InputB {
 
 layout(std430, binding = 2) writeonly buffer Output {
     float data[];
-} outputC;
+} output_buf;
 
 layout(push_constant) uniform PushConstants {
     uint M;  // Height of A
@@ -19,8 +19,8 @@ layout(push_constant) uniform PushConstants {
     uint N;  // Width of B
 } pc;
 
-shared float tileA[16][16];
-shared float tileB[16][16];
+shared float sharedA[16][16];
+shared float sharedB[16][16];
 
 void main() {
     uint row = gl_GlobalInvocationID.y;
@@ -28,28 +28,42 @@ void main() {
     uint localRow = gl_LocalInvocationID.y;
     uint localCol = gl_LocalInvocationID.x;
 
-    float sum = 0.0;
+    // Boundary check
+    if (row >= pc.M || col >= pc.N) {
+        return;
+    }
 
+    float sum = 0.0;
     uint numTiles = (pc.K + 15) / 16;
 
     for (uint t = 0; t < numTiles; t++) {
-        uint aIdx = row * pc.K + t * 16 + localCol;
-        tileA[localRow][localCol] = (row < pc.M && (t * 16 + localCol) < pc.K) ? inputA.data[aIdx] : 0.0;
+        // Load data into shared memory with bounds checking
+        if (t * 16 + localCol < pc.K) {
+            sharedA[localRow][localCol] = inputA.data[row * pc.K + t * 16 + localCol];
+        } else {
+            sharedA[localRow][localCol] = 0.0;
+        }
 
-        uint bIdx = (t * 16 + localRow) * pc.N + col;
-        tileB[localRow][localCol] = ((t * 16 + localRow) < pc.K && col < pc.N) ? inputB.data[bIdx] : 0.0;
-
-        barrier();
-
-        for (uint k = 0; k < 16; k++) {
-            sum += tileA[localRow][k] * tileB[k][localCol];
+        if (t * 16 + localRow < pc.K) {
+            sharedB[localRow][localCol] = inputB.data[(t * 16 + localRow) * pc.N + col];
+        } else {
+            sharedB[localRow][localCol] = 0.0;
         }
 
         barrier();
+        memoryBarrierShared();
+
+        // Compute partial dot product
+        for (uint k = 0; k < 16 && t * 16 + k < pc.K; k++) {
+            sum += sharedA[localRow][k] * sharedB[k][localCol];
+        }
+
+        barrier();
+        memoryBarrierShared();
     }
 
+    // Store result
     if (row < pc.M && col < pc.N) {
-        uint cIdx = row * pc.N + col;
-        outputC.data[cIdx] = sum;
+        output_buf.data[row * pc.N + col] = sum;
     }
 }

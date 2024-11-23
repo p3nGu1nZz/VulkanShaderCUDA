@@ -11,43 +11,26 @@ layout(std430, binding = 1) readonly buffer InputB {
 
 layout(std430, binding = 2) writeonly buffer Output {
     float data[];
-} outputC;
+} output_buf;
 
 layout(push_constant) uniform PushConstants {
     uint total_elements;
 } pc;
 
 void main() {
-    // Get global invocation ID
     uint idx = gl_GlobalInvocationID.x;
+    if (idx >= pc.total_elements) return;
     
-    // Bounds check
-    if (idx >= pc.total_elements) {
-        return;
-    }
-    
-    // Load inputs with memory barrier for correctness
+    // Add memory barriers to ensure data is properly synchronized
     memoryBarrier();
     barrier();
     
     float a = inputA.data[idx];
     float b = inputB.data[idx];
-    
-    // Memory barrier to ensure loads complete
-    memoryBarrier();
-    barrier();
-    
-    // Perform addition
     float result = a + b;
     
-    // Memory barrier before store
     memoryBarrier();
     barrier();
     
-    // Store result
-    outputC.data[idx] = result;
-    
-    // Final memory barrier
-    memoryBarrier();
-    barrier();
+    output_buf.data[idx] = result;
 }
