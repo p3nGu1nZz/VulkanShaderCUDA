@@ -15,6 +15,7 @@ import torch
 SCRIPT_DIR = Path(__file__).resolve().parent
 MODULE_PATH = SCRIPT_DIR / "build" / "bin" / "Release" / "vulkan_backend.pyd"
 
+
 # For debugging
 print(f"Looking for module at: {MODULE_PATH}")
 

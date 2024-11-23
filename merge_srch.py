@@ -1,21 +1,21 @@
 import os
 
 # Define the output file name
-output_file = "mergedforllmcomps.txt"
+output_file = "mergedforllmhfiles.txt"
 
-# Get all .comp files in the /comp/ directory
-comp_files = [os.path.join("comp", file) for file in os.listdir("comp") if file.endswith(".comp")]
+# Get all .h files in the /h/ directory
+h_files = [os.path.join("src", file) for file in os.listdir("src") if file.endswith(".h")]
 
-if not comp_files:
-    print("No .comp files found in the /comp/ directory.")
+if not h_files:
+    print("No .h files found in the /h/ directory.")
     exit()
 
-print(f"Found {len(comp_files)} .comp files. Merging...")
+print(f"Found {len(h_files)} .h files. Merging...")
 
 try:
     # Open the output file for writing
     with open(output_file, "w") as outfile:
-        for file in comp_files:
+        for file in h_files:
             print(f"Adding contents of {file}...")
             outfile.write(f"// {file}\n")  # Vulkan-style filename comment
             with open(file, "r") as infile:

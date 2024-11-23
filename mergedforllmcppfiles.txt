@@ -1,0 +1,1587 @@
+// src\CommandBufferManager.cpp
+#include "CommandBufferManager.h"
+#include "spdlog/spdlog.h"
+
+CommandBufferManager::CommandBufferManager(VkDevice device, VkCommandPool commandPool)
+    : device(device), commandPool(commandPool) {
+    spdlog::info("CommandBufferManager created.");
+}
+
+CommandBufferManager::~CommandBufferManager() {
+    std::lock_guard<std::mutex> lock(mutex);
+
+    while (!commandBuffers.empty()) {
+        VkCommandBuffer cmd = commandBuffers.front();
+        vkFreeCommandBuffers(device, commandPool, 1, &cmd);
+        commandBuffers.pop();
+    }
+    spdlog::info("CommandBufferManager destroyed.");
+}
+
+VkCommandBuffer CommandBufferManager::acquireCommandBuffer() {
+    std::lock_guard<std::mutex> lock(mutex);
+
+    if (!commandBuffers.empty()) {
+        VkCommandBuffer cmd = commandBuffers.front();
+        commandBuffers.pop();
+        return cmd;
+    }
+
+    VkCommandBufferAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = commandPool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer cmdBuffer;
+    if (vkAllocateCommandBuffers(device, &allocInfo, &cmdBuffer) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate command buffer.");
+    }
+
+    return cmdBuffer;
+}
+
+void CommandBufferManager::releaseCommandBuffer(VkCommandBuffer cmd) {
+    std::lock_guard<std::mutex> lock(mutex);
+    commandBuffers.push(cmd);
+}
+
+// src\DescriptorSetManager.cpp
+#include "DescriptorSetManager.h"
+#include "spdlog/spdlog.h"
+
+DescriptorSetManager::DescriptorSetManager(VkDevice device, VkDescriptorPool descriptorPool, VkDescriptorSetLayout descriptorSetLayout)
+    : device(device), descriptorPool(descriptorPool), descriptorSetLayout(descriptorSetLayout) {
+    spdlog::info("DescriptorSetManager created.");
+}
+
+DescriptorSetManager::~DescriptorSetManager() {
+    spdlog::info("DescriptorSetManager destroyed.");
+}
+
+VkDescriptorSet DescriptorSetManager::allocateDescriptorSet() {
+    VkDescriptorSetAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = descriptorPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &descriptorSetLayout;
+
+    VkDescriptorSet descriptorSet;
+    if (vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate descriptor set.");
+    }
+
+    return descriptorSet;
+}
+
+void DescriptorSetManager::updateDescriptorSet(VkDescriptorSet descriptorSet, const std::vector<VkBuffer>& inputBuffers, VkBuffer outputBuffer) {
+    std::vector<VkDescriptorBufferInfo> bufferInfos(inputBuffers.size());
+
+    for (size_t i = 0; i < inputBuffers.size(); i++) {
+        bufferInfos[i].buffer = inputBuffers[i];
+        bufferInfos[i].offset = 0;
+        bufferInfos[i].range = VK_WHOLE_SIZE;
+    }
+
+    VkDescriptorBufferInfo outputBufferInfo = {};
+    outputBufferInfo.buffer = outputBuffer;
+    outputBufferInfo.offset = 0;
+    outputBufferInfo.range = VK_WHOLE_SIZE;
+
+    std::vector<VkWriteDescriptorSet> descriptorWrites(bufferInfos.size() + 1);
+
+    for (size_t i = 0; i < bufferInfos.size(); i++) {
+        descriptorWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrites[i].dstSet = descriptorSet;
+        descriptorWrites[i].dstBinding = static_cast<uint32_t>(i);
+        descriptorWrites[i].dstArrayElement = 0;
+        descriptorWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        descriptorWrites[i].descriptorCount = 1;
+        descriptorWrites[i].pBufferInfo = &bufferInfos[i];
+    }
+
+    descriptorWrites.back().sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptorWrites.back().dstSet = descriptorSet;
+    descriptorWrites.back().dstBinding = static_cast<uint32_t>(bufferInfos.size());
+    descriptorWrites.back().dstArrayElement = 0;
+    descriptorWrites.back().descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    descriptorWrites.back().descriptorCount = 1;
+    descriptorWrites.back().pBufferInfo = &outputBufferInfo;
+
+    vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+}
+
+// src\OnnxModelParser.cpp
+#include "OnnxModelParser.h"
+#include <fstream>
+#include <stdexcept>
+#include <google/protobuf/io/zero_copy_stream_impl.h>
+#include <google/protobuf/text_format.h>
+
+OnnxModelParser::OnnxModelParser(const std::string& modelPath) {
+    std::ifstream modelFile(modelPath, std::ios::binary);
+    if (!modelFile.is_open()) {
+        throw std::runtime_error("Failed to open ONNX model file: " + modelPath);
+    }
+
+    google::protobuf::io::IstreamInputStream input(&modelFile);
+    if (!modelProto.ParseFromIstream(&modelFile)) {
+        modelFile.close();
+        throw std::runtime_error("Failed to parse ONNX model.");
+    }
+
+    modelFile.close();
+}
+
+const onnx::GraphProto& OnnxModelParser::getGraph() const {
+    return modelProto.graph();
+}
+
+std::vector<onnx::NodeProto> OnnxModelParser::getNodes() const {
+    return std::vector<onnx::NodeProto>(modelProto.graph().node().begin(), 
+                                      modelProto.graph().node().end());
+}
+
+onnx::TensorProto OnnxModelParser::getInitializer(const std::string& name) const {
+    for (const auto& initializer : modelProto.graph().initializer()) {
+        if (initializer.name() == name) {
+            return initializer;
+        }
+    }
+    throw std::runtime_error("Initializer not found: " + name);
+}
+// src\PipelineManager.cpp
+#include "PipelineManager.h"
+#include <fstream>
+#include <spdlog/spdlog.h>
+
+PipelineManager::PipelineManager(std::shared_ptr<ShaderManager> shaderManager, VkDevice device)
+    : shaderManager(shaderManager), device(device) {}
+
+PipelineManager::~PipelineManager() {
+    // Clean up pipelines
+    for (auto& [key, pipeline] : pipelines) {
+        vkDestroyPipeline(device, pipeline, nullptr);
+    }
+
+    // Clean up pipeline layouts
+    for (auto& [key, layout] : pipelineLayouts) {
+        vkDestroyPipelineLayout(device, layout, nullptr);
+    }
+}
+
+std::size_t PipelineKeyHash::operator()(const PipelineKey& key) const {
+    std::size_t res = std::hash<int>()(static_cast<int>(key.opType));
+    
+    // Combine hash of input formats
+    for (const auto& format : key.inputFormats) {
+        res ^= std::hash<std::string>()(format) + 0x9e3779b9 + (res << 6) + (res >> 2);
+    }
+
+    // Combine hash of output formats
+    for (const auto& format : key.outputFormats) {
+        res ^= std::hash<std::string>()(format) + 0x9e3779b9 + (res << 6) + (res >> 2);
+    }
+
+    // Combine workgroup size hashes
+    res ^= std::hash<uint32_t>()(key.workgroupSizeX) + 0x9e3779b9 + (res << 6) + (res >> 2);
+    res ^= std::hash<uint32_t>()(key.workgroupSizeY) + 0x9e3779b9 + (res << 6) + (res >> 2);
+    res ^= std::hash<uint32_t>()(key.workgroupSizeZ) + 0x9e3779b9 + (res << 6) + (res >> 2);
+
+    return res;
+}
+
+VkPipeline PipelineManager::getPipeline(const PipelineKey& key) {
+    // Check if pipeline already exists
+    auto it = pipelines.find(key);
+    if (it != pipelines.end()) {
+        return it->second;
+    }
+
+    // Create new pipeline layout
+    VkPipelineLayout pipelineLayout = getPipelineLayout(key);
+
+    // Load shader module
+    std::string shaderName = getShaderName(key.opType);
+    std::vector<char> shaderCode = loadShaderCode(shaderName);
+    VkShaderModule shaderModule = shaderManager->getShaderModule(shaderName, shaderCode);
+
+    // Create compute pipeline
+    VkComputePipelineCreateInfo pipelineInfo = {};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineInfo.layout = pipelineLayout;
+    pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipelineInfo.stage.module = shaderModule;
+    pipelineInfo.stage.pName = "main";
+
+    VkPipeline pipeline;
+    VkResult result = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline);
+    if (result != VK_SUCCESS) {
+        throw VulkanError("Failed to create compute pipeline.");
+    }
+
+    // Store and return the created pipeline
+    pipelines[key] = pipeline;
+    return pipeline;
+}
+
+VkPipelineLayout PipelineManager::getPipelineLayout(const PipelineKey& key) {
+    // Check if pipeline layout already exists
+    auto it = pipelineLayouts.find(key);
+    if (it != pipelineLayouts.end()) {
+        return it->second;
+    }
+
+    // Define push constants based on the operation type
+    VkPushConstantRange pushConstantRange = {};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    switch (key.opType) {
+        case VulkanOperationType::MatMul:
+            pushConstantRange.size = sizeof(MatMulPushConstants);
+            break;
+        case VulkanOperationType::Conv2D:
+            pushConstantRange.size = sizeof(Conv2DPushConstants);
+            break;
+        case VulkanOperationType::ReLU:
+            pushConstantRange.size = sizeof(ReLUPushConstants);
+            break;
+        case VulkanOperationType::Sigmoid:
+            pushConstantRange.size = sizeof(SigmoidPushConstants);
+            break;
+        case VulkanOperationType::Softmax:
+            pushConstantRange.size = sizeof(SoftmaxPushConstants);
+            break;
+        case VulkanOperationType::MaxPool:
+            pushConstantRange.size = sizeof(MaxPoolPushConstants);
+            break;
+        case VulkanOperationType::BatchNorm:
+            pushConstantRange.size = sizeof(BatchNormPushConstants);
+            break;
+        case VulkanOperationType::Add:
+            pushConstantRange.size = sizeof(AddPushConstants);
+            break;
+        default:
+            pushConstantRange.size = 0;
+    }
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 0; // No descriptor sets used in this example
+    pipelineLayoutInfo.pSetLayouts = nullptr;
+    if (pushConstantRange.size > 0) {
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+    }
+
+    VkPipelineLayout pipelineLayout;
+    VkResult result = vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout);
+    if (result != VK_SUCCESS) {
+        throw VulkanError("Failed to create pipeline layout.");
+    }
+
+    // Store and return the created layout
+    pipelineLayouts[key] = pipelineLayout;
+    return pipelineLayout;
+}
+
+std::string PipelineManager::getShaderName(VulkanOperationType opType) const {
+    // Map operation type to shader name
+    switch (opType) {
+        case VulkanOperationType::MatMul:   return "matmul.comp.spv";
+        case VulkanOperationType::Conv2D:   return "conv2d.comp.spv";
+        case VulkanOperationType::ReLU:     return "relu.comp.spv";
+        case VulkanOperationType::Sigmoid:  return "sigmoid.comp.spv";
+        case VulkanOperationType::Softmax:  return "softmax.comp.spv";
+        case VulkanOperationType::MaxPool:  return "maxpool.comp.spv";
+        case VulkanOperationType::BatchNorm: return "batchnorm.comp.spv";
+        case VulkanOperationType::Add:      return "add.comp.spv";
+        default:
+            throw VulkanError("Unknown Vulkan operation type.");
+    }
+}
+
+std::vector<char> PipelineManager::loadShaderCode(const std::string& shaderName) const {
+    // Load shader binary from file
+    std::string shaderPath = "shaders/" + shaderName;
+    std::ifstream file(shaderPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        throw VulkanError("Failed to open shader file: " + shaderPath);
+    }
+
+    size_t fileSize = static_cast<size_t>(file.tellg());
+    std::vector<char> buffer(fileSize);
+
+    file.seekg(0);
+    file.read(buffer.data(), fileSize);
+    file.close();
+
+    return buffer;
+}
+
+// src\ShaderManager.cpp
+// src\ShaderManager.cpp
+
+#include "ShaderManager.h"
+
+// Constructor
+ShaderManager::ShaderManager(VkDevice device)
+    : device(device) {}
+
+// Destructor: Cleans up all shader modules
+ShaderManager::~ShaderManager() {
+    for (auto& [name, shaderModule] : shaderModules) {
+        vkDestroyShaderModule(device, shaderModule, nullptr);
+    }
+}
+
+// Retrieve or create a shader module based on the shader name and code
+VkShaderModule ShaderManager::getShaderModule(const std::string& shaderName, const std::vector<char>& code) {
+    auto it = shaderModules.find(shaderName);
+    if (it != shaderModules.end()) {
+        return it->second;
+    }
+
+    VkShaderModuleCreateInfo createInfo = {};
+    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    createInfo.codeSize = code.size();
+
+    // Ensure code is aligned to 4 bytes as required by Vulkan
+    if (code.size() % 4 != 0) {
+        throw VulkanError("Shader code size is not a multiple of 4 bytes.");
+    }
+    createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
+
+    VkShaderModule shaderModule;
+    VkResult result = vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule);
+    if (result != VK_SUCCESS) {
+        throw VulkanError("Failed to create shader module: " + shaderName);
+    }
+
+    shaderModules[shaderName] = shaderModule;
+    return shaderModule;
+}
+
+// src\VulkanBufferPool.cpp
+// src\VulkanBufferPool.cpp
+
+#include "VulkanBufferPool.h"
+
+// Constructor
+VulkanBufferPool::VulkanBufferPool(VkDevice device)
+    : device(device) {}
+
+// Destructor: Cleans up all buffers in the pool
+VulkanBufferPool::~VulkanBufferPool() {
+    while (!buffers.empty()) {
+        VkBuffer buffer = buffers.front();
+        buffers.pop();
+        vkDestroyBuffer(device, buffer, nullptr);
+    }
+}
+
+// Acquire a buffer from the pool or create a new one if the pool is empty
+VkBuffer VulkanBufferPool::acquireBuffer() {
+    if (!buffers.empty()) {
+        VkBuffer buf = buffers.front();
+        buffers.pop();
+        return buf;
+    }
+
+    // Create a new buffer with predefined size and usage
+    VkBufferCreateInfo bufferInfo = {};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = 1024 * 1024; // 1MB buffer, adjust as needed
+    bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VkBuffer buffer;
+    VkResult result = vkCreateBuffer(device, &bufferInfo, nullptr, &buffer);
+    if (result != VK_SUCCESS) {
+        throw VulkanError("Failed to create buffer in VulkanBufferPool.");
+    }
+
+    return buffer;
+}
+
+// Release a buffer back to the pool for reuse
+void VulkanBufferPool::releaseBuffer(VkBuffer buffer) {
+    buffers.push(buffer);
+}
+
+// src\VulkanContext.cpp
+#include "VulkanContext.h"
+#include "VulkanError.h"
+#include "spdlog/spdlog.h"
+
+VulkanContext::VulkanContext()
+    : instance(VK_NULL_HANDLE), physicalDevice(VK_NULL_HANDLE), device(VK_NULL_HANDLE), computeQueue(VK_NULL_HANDLE) {}
+
+VulkanContext::~VulkanContext() {
+    cleanupVulkan();
+}
+
+void VulkanContext::initVulkan() {
+    spdlog::info("Initializing Vulkan...");
+    // Create Vulkan instance
+    VkApplicationInfo appInfo = {};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.pApplicationName = "VulkanBackend";
+    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.pEngineName = "NoEngine";
+    appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.apiVersion = VK_API_VERSION_1_2;
+
+    VkInstanceCreateInfo createInfo = {};
+    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    createInfo.pApplicationInfo = &appInfo;
+
+    if (vkCreateInstance(&createInfo, nullptr, &instance) != VK_SUCCESS) {
+        throw VulkanError("Failed to create Vulkan instance");
+    }
+    spdlog::info("Vulkan instance created.");
+
+    // Pick a physical device
+    pickPhysicalDevice();
+    // Create logical device
+    createLogicalDevice();
+    // Initialize managers
+    memoryManager = std::make_unique<VulkanMemoryManager>(physicalDevice, device);
+    bufferPool = std::make_unique<VulkanBufferPool>(device);
+    pipelineManager = std::make_unique<PipelineManager>(nullptr, device); // Adjust as needed
+    commandBufferManager = std::make_unique<CommandBufferManager>(device, VK_NULL_HANDLE); // Adjust as needed
+    descriptorSetManager = std::make_shared<DescriptorSetManager>(device, VK_NULL_HANDLE, VK_NULL_HANDLE); // Adjust
+    spdlog::info("VulkanContext fully initialized.");
+}
+
+void VulkanContext::cleanupVulkan() {
+    if (device != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(device);
+    }
+
+    memoryManager.reset();
+    bufferPool.reset();
+    pipelineManager.reset();
+    commandBufferManager.reset();
+    descriptorSetManager.reset();
+
+    if (device != VK_NULL_HANDLE) {
+        vkDestroyDevice(device, nullptr);
+        device = VK_NULL_HANDLE;
+    }
+    if (instance != VK_NULL_HANDLE) {
+        vkDestroyInstance(instance, nullptr);
+        instance = VK_NULL_HANDLE;
+    }
+
+    spdlog::info("VulkanContext cleaned up.");
+}
+
+void VulkanContext::pickPhysicalDevice() {
+    uint32_t deviceCount = 0;
+    vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+    if (deviceCount == 0) {
+        throw VulkanError("Failed to find GPUs with Vulkan support");
+    }
+
+    std::vector<VkPhysicalDevice> devices(deviceCount);
+    vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
+
+    // Use the first available device for simplicity
+    physicalDevice = devices[0];
+    spdlog::info("Selected Vulkan physical device.");
+}
+
+void VulkanContext::createLogicalDevice() {
+    findComputeQueueFamily();
+
+    float queuePriority = 1.0f;
+    VkDeviceQueueCreateInfo queueCreateInfo = {};
+    queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queueCreateInfo.queueFamilyIndex = computeQueueFamilyIndex;
+    queueCreateInfo.queueCount = 1;
+    queueCreateInfo.pQueuePriorities = &queuePriority;
+
+    VkDeviceCreateInfo createInfo = {};
+    createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    createInfo.pQueueCreateInfos = &queueCreateInfo;
+    createInfo.queueCreateInfoCount = 1;
+
+    if (vkCreateDevice(physicalDevice, &createInfo, nullptr, &device) != VK_SUCCESS) {
+        throw VulkanError("Failed to create logical device");
+    }
+
+    vkGetDeviceQueue(device, computeQueueFamilyIndex, 0, &computeQueue);
+    spdlog::info("Logical device created and compute queue retrieved.");
+}
+
+void VulkanContext::findComputeQueueFamily() {
+    uint32_t queueFamilyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
+
+    for (uint32_t i = 0; i < queueFamilyCount; i++) {
+        if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+            computeQueueFamilyIndex = i;
+            return;
+        }
+    }
+    throw VulkanError("Failed to find a compute queue family");
+}
+
+// src\VulkanMemoryManager.cpp
+#include "VulkanMemoryManager.h"
+
+VulkanMemoryManager::VulkanMemoryManager(VkPhysicalDevice physicalDevice, VkDevice device)
+    : physicalDevice(physicalDevice), device(device) {}
+
+VulkanMemoryManager::~VulkanMemoryManager() {
+    for (auto& allocation : allocations) {
+        if (allocation.memory != VK_NULL_HANDLE) {
+            vkFreeMemory(device, allocation.memory, nullptr);
+        }
+    }
+}
+
+VulkanMemoryManager::AllocationInfo VulkanMemoryManager::allocate(VkDeviceSize size, VkMemoryPropertyFlags properties) {
+    VkBuffer dummyBuffer;
+    VkBufferCreateInfo bufferInfo = {};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VkResult result = vkCreateBuffer(device, &bufferInfo, nullptr, &dummyBuffer);
+    if (result != VK_SUCCESS) {
+        throw VulkanError("Failed to create dummy buffer for memory allocation.");
+    }
+
+    VkMemoryRequirements memRequirements;
+    vkGetBufferMemoryRequirements(device, dummyBuffer, &memRequirements);
+    vkDestroyBuffer(device, dummyBuffer, nullptr);
+
+    uint32_t memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+    if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
+        throw VulkanError("Failed to find suitable memory type.");
+    }
+
+    VkMemoryAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = memoryTypeIndex;
+
+    AllocationInfo allocation = {};
+    result = vkAllocateMemory(device, &allocInfo, nullptr, &allocation.memory);
+    if (result != VK_SUCCESS) {
+        throw VulkanError("Failed to allocate device memory.");
+    }
+
+    allocation.size = memRequirements.size;
+    allocation.offset = 0;
+    allocations.push_back(allocation);
+
+    return allocation;
+}
+
+uint32_t VulkanMemoryManager::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && 
+            (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+
+    return std::numeric_limits<uint32_t>::max();
+}
+// src\VulkanOperations.cpp
+#include "VulkanOperations.h"
+#include "vulkan_globals.h"
+#include "VulkanContext.h"
+#include "VulkanSync.h"
+#include "DescriptorSetManager.h"
+#include <spdlog/spdlog.h>
+
+namespace vulkan_ops {
+
+template<typename PushConstants>
+void executeShader(
+    VulkanOperationType opType,
+    const VulkanTensor& inputA,
+    const VulkanTensor* inputB,
+    const VulkanTensor* inputC,
+    VulkanTensor& output,
+    const PushConstants* pushConstants
+) {
+    spdlog::debug("Executing shader for operation: {}", static_cast<int>(opType));
+
+    // Get VulkanContext pointer
+    VulkanContext* context = vulkan_globals::getContext();
+
+    // Create pipeline key
+    PipelineKey key = {
+        opType,
+        {}, // Input formats
+        {}, // Output formats
+        256, 1, 1 // Workgroup sizes
+    };
+
+    // Get pipeline and layout
+    VkPipeline pipeline = context->getPipelineManager()->getPipeline(key);
+    VkPipelineLayout pipelineLayout = context->getPipelineManager()->getPipelineLayout(key);
+
+    // Acquire command buffer
+    VkCommandBuffer commandBuffer = context->getCommandBufferManager()->acquireCommandBuffer();
+
+    // Begin command buffer
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    VkResult result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Failed to begin command buffer");
+    }
+
+    // Bind pipeline
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+
+    // Allocate and update descriptor set
+    std::shared_ptr<DescriptorSetManager> descriptorManager = context->getDescriptorSetManager();
+    VkDescriptorSet descriptorSet = descriptorManager->allocateDescriptorSet();
+    
+    std::vector<VkBuffer> buffers = { inputA.getBuffer() };
+    if (inputB) buffers.push_back(inputB->getBuffer());
+    if (inputC) buffers.push_back(inputC->getBuffer());
+    descriptorManager->updateDescriptorSet(descriptorSet, buffers, output.getBuffer());
+
+    // Bind descriptor sets
+    vkCmdBindDescriptorSets(
+        commandBuffer,
+        VK_PIPELINE_BIND_POINT_COMPUTE,
+        pipelineLayout,
+        0,
+        1,
+        &descriptorSet,
+        0,
+        nullptr
+    );
+
+    // Push constants if provided
+    if (pushConstants) {
+        vkCmdPushConstants(
+            commandBuffer,
+            pipelineLayout,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            0,
+            sizeof(PushConstants),
+            pushConstants
+        );
+    }
+
+    // Calculate dispatch dimensions
+    uint32_t globalWorkSizeX = (output.getSize() + 255) / 256;
+    uint32_t globalWorkSizeY = 1;
+    uint32_t globalWorkSizeZ = 1;
+
+    // Dispatch compute shader
+    vkCmdDispatch(commandBuffer, globalWorkSizeX, globalWorkSizeY, globalWorkSizeZ);
+
+    // Memory barrier
+    VkMemoryBarrier memoryBarrier = {};
+    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    memoryBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT,
+        0,
+        1, &memoryBarrier,
+        0, nullptr,
+        0, nullptr
+    );
+
+    // End command buffer
+    result = vkEndCommandBuffer(commandBuffer);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Failed to end command buffer");
+    }
+
+    // Submit command buffer
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+
+    // Create fence for synchronization
+    VulkanSync::ScopedGPUWait scopedWait(vulkan_globals::device);
+    
+    result = vkQueueSubmit(vulkan_globals::computeQueue, 1, &submitInfo, scopedWait.get());
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Failed to submit command buffer");
+    }
+
+    // Wait for completion
+    scopedWait.wait();
+
+    // Release command buffer
+    context->getCommandBufferManager()->releaseCommandBuffer(commandBuffer);
+}
+
+void executeAdd(const VulkanTensor& inputA, const VulkanTensor& inputB, VulkanTensor& output) {
+    if (inputA.getSize() != inputB.getSize() || inputA.getSize() != output.getSize()) {
+        throw std::runtime_error("Tensor size mismatch in Add operation");
+    }
+
+    AddPushConstants pushConstants = {
+        static_cast<uint32_t>(inputA.getSize() / sizeof(float))
+    };
+    
+    executeShader(VulkanOperationType::Add, inputA, &inputB, nullptr, output, &pushConstants);
+}
+
+void executeMatMul(const VulkanTensor& a, const VulkanTensor& b, VulkanTensor& c, 
+                  uint32_t M, uint32_t K, uint32_t N) {
+    // Validate dimensions
+    if (a.getSize() != M * K * sizeof(float) ||
+        b.getSize() != K * N * sizeof(float) ||
+        c.getSize() != M * N * sizeof(float)) {
+        throw std::runtime_error("Tensor dimensions mismatch in MatMul operation");
+    }
+
+    MatMulPushConstants pushConstants = {
+        M, K, N
+    };
+
+    executeShader(VulkanOperationType::MatMul, a, &b, nullptr, c, &pushConstants);
+}
+
+void executeReLU(const VulkanTensor& input, VulkanTensor& output) {
+    if (input.getSize() != output.getSize()) {
+        throw std::runtime_error("Tensor size mismatch in ReLU operation");
+    }
+
+    ReLUPushConstants pushConstants = {
+        static_cast<uint32_t>(input.getSize() / sizeof(float))
+    };
+
+    executeShader(VulkanOperationType::ReLU, input, nullptr, nullptr, output, &pushConstants);
+}
+
+void executeSigmoid(const VulkanTensor& input, VulkanTensor& output) {
+    if (input.getSize() != output.getSize()) {
+        throw std::runtime_error("Tensor size mismatch in Sigmoid operation");
+    }
+
+    SigmoidPushConstants pushConstants = {
+        static_cast<uint32_t>(input.getSize() / sizeof(float))
+    };
+
+    executeShader(VulkanOperationType::Sigmoid, input, nullptr, nullptr, output, &pushConstants);
+}
+
+void executeSoftmax(const VulkanTensor& input, VulkanTensor& output) {
+    if (input.getSize() != output.getSize()) {
+        throw std::runtime_error("Tensor size mismatch in Softmax operation");
+    }
+
+    SoftmaxPushConstants pushConstants = {
+        static_cast<uint32_t>(input.getSize() / sizeof(float))
+    };
+
+    executeShader(VulkanOperationType::Softmax, input, nullptr, nullptr, output, &pushConstants);
+}
+
+void executeConv2D(const VulkanTensor& input, const VulkanTensor& kernel,
+                  VulkanTensor& output, const Conv2DPushConstants& pushConstants) {
+    // Validate dimensions
+    uint32_t expectedOutputWidth = 
+        (pushConstants.input_width + 2 * pushConstants.padding - pushConstants.kernel_size) / 
+        pushConstants.stride + 1;
+    uint32_t expectedOutputHeight = 
+        (pushConstants.input_height + 2 * pushConstants.padding - pushConstants.kernel_size) / 
+        pushConstants.stride + 1;
+
+    if (output.getWidth() != expectedOutputWidth || 
+        output.getHeight() != expectedOutputHeight ||
+        output.getChannels() != pushConstants.output_channels) {
+        throw std::runtime_error("Output tensor dimensions mismatch in Conv2D operation");
+    }
+
+    size_t expectedKernelSize = 
+        pushConstants.kernel_size * 
+        pushConstants.kernel_size * 
+        pushConstants.input_channels * 
+        pushConstants.output_channels * 
+        sizeof(float);
+
+    if (kernel.getSize() != expectedKernelSize) {
+        throw std::runtime_error("Kernel tensor dimensions mismatch in Conv2D operation");
+    }
+
+    executeShader(VulkanOperationType::Conv2D, input, &kernel, nullptr, output, &pushConstants);
+}
+
+void executeMaxPool(const VulkanTensor& input, VulkanTensor& output,
+                   uint32_t width, uint32_t height, uint32_t channels,
+                   uint32_t poolSizeX, uint32_t poolSizeY,
+                   uint32_t strideX, uint32_t strideY) {
+    // Validate dimensions
+    uint32_t expectedOutputWidth = (width - poolSizeX) / strideX + 1;
+    uint32_t expectedOutputHeight = (height - poolSizeY) / strideY + 1;
+
+    if (output.getWidth() != expectedOutputWidth ||
+        output.getHeight() != expectedOutputHeight ||
+        output.getChannels() != channels) {
+        throw std::runtime_error("Output tensor dimensions mismatch in MaxPool operation");
+    }
+
+    MaxPoolPushConstants pushConstants = {
+        width, height, channels, 1,  // batch_size = 1
+        poolSizeX, poolSizeY,
+        strideX, strideY
+    };
+
+    executeShader(VulkanOperationType::MaxPool, input, nullptr, nullptr, output, &pushConstants);
+}
+
+void executeBatchNorm(const VulkanTensor& input, const VulkanTensor& gamma,
+                     const VulkanTensor& beta, VulkanTensor& output,
+                     uint32_t size, float epsilon) {
+    // Validate dimensions
+    if (input.getSize() != output.getSize() ||
+        gamma.getSize() != size * sizeof(float) ||
+        beta.getSize() != size * sizeof(float)) {
+        throw std::runtime_error("Tensor dimensions mismatch in BatchNorm operation");
+    }
+
+    BatchNormPushConstants pushConstants = {
+        size,
+        epsilon
+    };
+
+    executeShader(VulkanOperationType::BatchNorm, input, &gamma, &beta, output, &pushConstants);
+}
+
+} // namespace vulkan_ops
+// src\VulkanSync.cpp
+#include "VulkanSync.h"
+
+ScopedGPUWait::ScopedGPUWait(VkDevice device) : deviceRef(device), fence(VK_NULL_HANDLE) {
+    VkFenceCreateInfo fenceInfo = {};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = 0;
+
+    VkResult result = vkCreateFence(deviceRef, &fenceInfo, nullptr, &fence);
+    if (result != VK_SUCCESS) {
+        throw VulkanError("Failed to create fence during ScopedGPUWait.");
+    }
+}
+
+ScopedGPUWait::~ScopedGPUWait() {
+    if (fence != VK_NULL_HANDLE) {
+        vkDestroyFence(deviceRef, fence, nullptr);
+        fence = VK_NULL_HANDLE;
+    }
+}
+
+void ScopedGPUWait::wait() const {
+    if (fence == VK_NULL_HANDLE) {
+        throw VulkanError("Attempting to wait on null fence.");
+    }
+
+    VkResult result = vkWaitForFences(deviceRef, 1, &fence, VK_TRUE, UINT64_MAX);
+    if (result != VK_SUCCESS) {
+        throw VulkanError("Failed to wait for fence in ScopedGPUWait.");
+    }
+
+    result = vkResetFences(deviceRef, 1, &fence);
+    if (result != VK_SUCCESS) {
+        throw VulkanError("Failed to reset fence in ScopedGPUWait.");
+    }
+}
+
+VkFence ScopedGPUWait::get() const {
+    return fence;
+}
+// src\vulkan_backend_bindings.cpp
+#include <pybind11/pybind11.h>
+#include <pybind11/numpy.h>
+#include <pybind11/stl.h>
+#include <spdlog/spdlog.h>
+
+#include "VulkanOperations.h"
+#include "VulkanContext.h"
+#include "VulkanTensor.h"
+#include "vulkan_globals.h"
+#include "OnnxModelParser.h"
+
+namespace py = pybind11;
+
+PYBIND11_MODULE(vulkan_backend, m) {
+    m.doc() = "Vulkan Backend for PyTorch Operations";
+
+    // Initialize Vulkan Context if not already initialized
+    if (!vulkan_globals::getContext()) {
+        vulkan_globals::initializeVulkan();
+    }
+
+    // Import ONNX model
+    m.def("import_onnx_model", [](const std::string& modelPath) -> void {
+        try {
+            OnnxModelParser parser(modelPath);
+            spdlog::info("ONNX model imported successfully: {}", modelPath);
+        }
+        catch (const std::exception& e) {
+            throw std::runtime_error("Failed to import ONNX model: " + std::string(e.what()));
+        }
+    }, "Import an ONNX model for execution on Vulkan backend");
+
+    // Add Operation
+    m.def("vulkan_add", [](py::array_t<float> inputA, py::array_t<float> inputB, py::array_t<float> output) {
+        try {
+            // Ensure input arrays are contiguous
+            if (!(inputA.flags() & py::array::c_style)) {
+                throw std::runtime_error("Input A must be a contiguous array.");
+            }
+            if (!(inputB.flags() & py::array::c_style)) {
+                throw std::runtime_error("Input B must be a contiguous array.");
+            }
+            if (!(output.flags() & py::array::c_style)) {
+                throw std::runtime_error("Output must be a contiguous array.");
+            }
+
+            auto buf_a = inputA.request();
+            auto buf_b = inputB.request();
+            auto buf_c = output.request();
+
+            // Ensure all arrays have the same size
+            if (buf_a.size != buf_b.size || buf_a.size != buf_c.size) {
+                throw std::runtime_error("Input and output arrays must have the same size.");
+            }
+
+            auto context = vulkan_globals::getContext();
+
+            // Create VulkanTensor instances
+            VulkanTensor tensorA(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_a.size * sizeof(float)),
+                1, 1, 1, 1,
+                buf_a.ptr,
+                TensorLayout::Layout::LINEAR
+            );
+            VulkanTensor tensorB(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_b.size * sizeof(float)),
+                1, 1, 1, 1,
+                buf_b.ptr,
+                TensorLayout::Layout::LINEAR
+            );
+            VulkanTensor tensorC(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_c.size * sizeof(float)),
+                1, 1, 1, 1,
+                nullptr,
+                TensorLayout::Layout::LINEAR
+            );
+
+            // Execute Add operation
+            vulkan_ops::executeAdd(tensorA, tensorB, tensorC);
+
+            // Download result
+            tensorC.download(buf_c.ptr);
+        }
+        catch (const std::exception& e) {
+            throw std::runtime_error("Add operation failed: " + std::string(e.what()));
+        }
+    }, "Execute addition operation on Vulkan backend");
+
+    // Matrix Multiplication operation
+    m.def("vulkan_matmul", [](py::array_t<float> inputA, py::array_t<float> inputB, py::array_t<float> output,
+                            uint32_t M, uint32_t K, uint32_t N) {
+        try {
+            // Ensure input arrays are contiguous
+            if (!(inputA.flags() & py::array::c_style)) {
+                throw std::runtime_error("Input A must be a contiguous array.");
+            }
+            if (!(inputB.flags() & py::array::c_style)) {
+                throw std::runtime_error("Input B must be a contiguous array.");
+            }
+            if (!(output.flags() & py::array::c_style)) {
+                throw std::runtime_error("Output must be a contiguous array.");
+            }
+
+            auto buf_a = inputA.request();
+            auto buf_b = inputB.request();
+            auto buf_c = output.request();
+
+            // Calculate expected sizes
+            size_t expected_size_a = static_cast<size_t>(M * K);
+            size_t expected_size_b = static_cast<size_t>(K * N);
+            size_t expected_size_c = static_cast<size_t>(M * N);
+
+            if (buf_a.size != expected_size_a) {
+                throw std::runtime_error("Input A size mismatch. Expected: " + std::to_string(expected_size_a) + 
+                                       ", Got: " + std::to_string(buf_a.size));
+            }
+            if (buf_b.size != expected_size_b) {
+                throw std::runtime_error("Input B size mismatch. Expected: " + std::to_string(expected_size_b) + 
+                                       ", Got: " + std::to_string(buf_b.size));
+            }
+            if (buf_c.size != expected_size_c) {
+                throw std::runtime_error("Output size mismatch. Expected: " + std::to_string(expected_size_c) + 
+                                       ", Got: " + std::to_string(buf_c.size));
+            }
+
+            auto context = vulkan_globals::getContext();
+
+            // Create VulkanTensor instances
+            VulkanTensor tensorA(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_a.size * sizeof(float)),
+                K, M, 1, 1,
+                buf_a.ptr,
+                TensorLayout::Layout::LINEAR
+            );
+            VulkanTensor tensorB(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_b.size * sizeof(float)),
+                N, K, 1, 1,
+                buf_b.ptr,
+                TensorLayout::Layout::LINEAR
+            );
+            VulkanTensor tensorC(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_c.size * sizeof(float)),
+                N, M, 1, 1,
+                nullptr,
+                TensorLayout::Layout::LINEAR
+            );
+
+            // Execute MatMul operation
+            vulkan_ops::executeMatMul(tensorA, tensorB, tensorC, M, K, N);
+
+            // Download result
+            tensorC.download(buf_c.ptr);
+        }
+        catch (const std::exception& e) {
+            throw std::runtime_error("Matrix multiplication failed: " + std::string(e.what()));
+        }
+    }, "Execute matrix multiplication on Vulkan backend");
+
+    // ReLU operation
+    m.def("vulkan_relu", [](py::array_t<float> input, py::array_t<float> output) {
+        try {
+            // Ensure input arrays are contiguous
+            if (!(input.flags() & py::array::c_style)) {
+                throw std::runtime_error("Input must be a contiguous array.");
+            }
+            if (!(output.flags() & py::array::c_style)) {
+                throw std::runtime_error("Output must be a contiguous array.");
+            }
+
+            auto buf_input = input.request();
+            auto buf_output = output.request();
+
+            // Ensure sizes match
+            if (buf_input.size != buf_output.size) {
+                throw std::runtime_error("Input and output arrays must have the same size.");
+            }
+
+            auto context = vulkan_globals::getContext();
+
+            // Create VulkanTensor instances
+            VulkanTensor tensorInput(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_input.size * sizeof(float)),
+                1, 1, 1, 1,
+                buf_input.ptr,
+                TensorLayout::Layout::LINEAR
+            );
+            VulkanTensor tensorOutput(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_output.size * sizeof(float)),
+                1, 1, 1, 1,
+                nullptr,
+                TensorLayout::Layout::LINEAR
+            );
+
+            // Execute ReLU operation
+            vulkan_ops::executeReLU(tensorInput, tensorOutput);
+
+            // Download result
+            tensorOutput.download(buf_output.ptr);
+        }
+        catch (const std::exception& e) {
+            throw std::runtime_error("ReLU operation failed: " + std::string(e.what()));
+        }
+    }, "Execute ReLU activation on Vulkan backend");
+
+    // Sigmoid operation
+    m.def("vulkan_sigmoid", [](py::array_t<float> input, py::array_t<float> output) {
+        try {
+            // Ensure input arrays are contiguous
+            if (!(input.flags() & py::array::c_style)) {
+                throw std::runtime_error("Input must be a contiguous array.");
+            }
+            if (!(output.flags() & py::array::c_style)) {
+                throw std::runtime_error("Output must be a contiguous array.");
+            }
+
+            auto buf_input = input.request();
+            auto buf_output = output.request();
+
+            // Ensure sizes match
+            if (buf_input.size != buf_output.size) {
+                throw std::runtime_error("Input and output arrays must have the same size.");
+            }
+
+            auto context = vulkan_globals::getContext();
+
+            // Create VulkanTensor instances
+            VulkanTensor tensorInput(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_input.size * sizeof(float)),
+                1, 1, 1, 1,
+                buf_input.ptr,
+                TensorLayout::Layout::LINEAR
+            );
+            VulkanTensor tensorOutput(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_output.size * sizeof(float)),
+                1, 1, 1, 1,
+                nullptr,
+                TensorLayout::Layout::LINEAR
+            );
+
+            // Execute Sigmoid operation
+            vulkan_ops::executeSigmoid(tensorInput, tensorOutput);
+
+            // Download result
+            tensorOutput.download(buf_output.ptr);
+        }
+        catch (const std::exception& e) {
+            throw std::runtime_error("Sigmoid operation failed: " + std::string(e.what()));
+        }
+    }, "Execute Sigmoid activation on Vulkan backend");
+
+    // Softmax operation
+    m.def("vulkan_softmax", [](py::array_t<float> input, py::array_t<float> output) {
+        try {
+            // Ensure input arrays are contiguous
+            if (!(input.flags() & py::array::c_style)) {
+                throw std::runtime_error("Input must be a contiguous array.");
+            }
+            if (!(output.flags() & py::array::c_style)) {
+                throw std::runtime_error("Output must be a contiguous array.");
+            }
+
+            auto buf_input = input.request();
+            auto buf_output = output.request();
+
+            // Ensure sizes match
+            if (buf_input.size != buf_output.size) {
+                throw std::runtime_error("Input and output arrays must have the same size.");
+            }
+
+            auto context = vulkan_globals::getContext();
+
+            // Create VulkanTensor instances
+            VulkanTensor tensorInput(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_input.size * sizeof(float)),
+                1, 1, 1, 1,
+                buf_input.ptr,
+                TensorLayout::Layout::LINEAR
+            );
+            VulkanTensor tensorOutput(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_output.size * sizeof(float)),
+                1, 1, 1, 1,
+                nullptr,
+                TensorLayout::Layout::LINEAR
+            );
+
+            // Execute Softmax operation
+            vulkan_ops::executeSoftmax(tensorInput, tensorOutput);
+
+            // Download result
+            tensorOutput.download(buf_output.ptr);
+        }
+        catch (const std::exception& e) {
+            throw std::runtime_error("Softmax operation failed: " + std::string(e.what()));
+        }
+    }, "Execute Softmax operation on Vulkan backend");
+
+// Conv2D operation
+    m.def("vulkan_conv2d", [](
+        py::array_t<float> input,
+        py::array_t<float> kernel,
+        py::array_t<float> output,
+        uint32_t input_width,
+        uint32_t input_height, 
+        uint32_t input_channels,
+        uint32_t output_channels,
+        uint32_t kernel_size,
+        uint32_t padding,
+        uint32_t stride) {
+        try {
+            // Ensure input arrays are contiguous
+            if (!(input.flags() & py::array::c_style)) {
+                throw std::runtime_error("Input must be a contiguous array.");
+            }
+            if (!(kernel.flags() & py::array::c_style)) {
+                throw std::runtime_error("Kernel must be a contiguous array.");
+            }
+            if (!(output.flags() & py::array::c_style)) {
+                throw std::runtime_error("Output must be a contiguous array.");
+            }
+
+            auto buf_input = input.request();
+            auto buf_kernel = kernel.request();
+            auto buf_output = output.request();
+
+            // Calculate output dimensions
+            uint32_t output_width = (input_width + 2 * padding - kernel_size) / stride + 1;
+            uint32_t output_height = (input_height + 2 * padding - kernel_size) / stride + 1;
+
+            // Calculate expected sizes
+            size_t expected_input_elements = static_cast<size_t>(input_width) * 
+                                           static_cast<size_t>(input_height) * 
+                                           static_cast<size_t>(input_channels);
+            size_t expected_kernel_elements = static_cast<size_t>(kernel_size) * 
+                                            static_cast<size_t>(kernel_size) * 
+                                            static_cast<size_t>(input_channels) * 
+                                            static_cast<size_t>(output_channels);
+            size_t expected_output_elements = static_cast<size_t>(output_width) * 
+                                            static_cast<size_t>(output_height) * 
+                                            static_cast<size_t>(output_channels);
+
+            // Validate sizes
+            if (buf_input.size != expected_input_elements) {
+                throw std::runtime_error(
+                    "Input size mismatch. Expected: " + std::to_string(expected_input_elements) +
+                    ", Got: " + std::to_string(buf_input.size)
+                );
+            }
+            if (buf_kernel.size != expected_kernel_elements) {
+                throw std::runtime_error(
+                    "Kernel size mismatch. Expected: " + std::to_string(expected_kernel_elements) +
+                    ", Got: " + std::to_string(buf_kernel.size)
+                );
+            }
+            if (buf_output.size != expected_output_elements) {
+                throw std::runtime_error(
+                    "Output size mismatch. Expected: " + std::to_string(expected_output_elements) +
+                    ", Got: " + std::to_string(buf_output.size)
+                );
+            }
+
+            auto context = vulkan_globals::getContext();
+
+            // Create VulkanTensor instances
+            VulkanTensor tensorInput(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_input.size * sizeof(float)),
+                input_width,
+                input_height,
+                input_channels,
+                1,
+                buf_input.ptr,
+                TensorLayout::Layout::NHWC
+            );
+            VulkanTensor tensorKernel(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_kernel.size * sizeof(float)),
+                kernel_size,
+                kernel_size,
+                input_channels,
+                output_channels,
+                buf_kernel.ptr,
+                TensorLayout::Layout::NHWC
+            );
+            VulkanTensor tensorOutput(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_output.size * sizeof(float)),
+                output_width,
+                output_height,
+                output_channels,
+                1,
+                nullptr,
+                TensorLayout::Layout::NHWC
+            );
+
+            // Set push constants
+            Conv2DPushConstants pushConstants{
+                input_width,
+                input_height,
+                input_channels,
+                output_channels,
+                kernel_size,
+                padding,
+                stride
+            };
+
+            // Execute convolution
+            vulkan_ops::executeConv2D(tensorInput, tensorKernel, tensorOutput, pushConstants);
+
+            // Download results
+            tensorOutput.download(buf_output.ptr);
+        }
+        catch (const std::exception& e) {
+            throw std::runtime_error("Conv2D operation failed: " + std::string(e.what()));
+        }
+    }, 
+    py::arg("input"), 
+    py::arg("kernel"),
+    py::arg("output"),
+    py::arg("input_width"),
+    py::arg("input_height"),
+    py::arg("input_channels"),
+    py::arg("output_channels"),
+    py::arg("kernel_size"),
+    py::arg("padding"),
+    py::arg("stride")
+    );
+
+    // MaxPool operation
+    m.def("vulkan_maxpool", [](py::array_t<float> input, py::array_t<float> output,
+                              uint32_t width, uint32_t height, uint32_t channels,
+                              uint32_t poolSizeX, uint32_t poolSizeY,
+                              uint32_t strideX, uint32_t strideY) {
+        try {
+            // Ensure input arrays are contiguous
+            if (!(input.flags() & py::array::c_style)) {
+                throw std::runtime_error("Input must be a contiguous array.");
+            }
+            if (!(output.flags() & py::array::c_style)) {
+                throw std::runtime_error("Output must be a contiguous array.");
+            }
+
+            auto buf_input = input.request();
+            auto buf_output = output.request();
+
+            uint32_t expected_output_width = (width - poolSizeX) / strideX + 1;
+            uint32_t expected_output_height = (height - poolSizeY) / strideY + 1;
+            uint32_t expected_output_size = expected_output_width * expected_output_height * channels;
+
+            if (buf_input.size != width * height * channels) {
+                throw std::runtime_error(
+                    "Input dimensions mismatch. Expected size: " + std::to_string(width * height * channels) +
+                    ", Got: " + std::to_string(buf_input.size)
+                );
+            }
+
+            if (buf_output.size != expected_output_size) {
+                throw std::runtime_error(
+                    "Output dimensions mismatch. Expected size: " + std::to_string(expected_output_size) +
+                    ", Got: " + std::to_string(buf_output.size)
+                );
+            }
+
+            auto context = vulkan_globals::getContext();
+
+            // Create VulkanTensor instances
+            VulkanTensor tensorInput(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_input.size * sizeof(float)),
+                width,
+                height,
+                channels,
+                1,
+                buf_input.ptr,
+                TensorLayout::Layout::NHWC
+            );
+            VulkanTensor tensorOutput(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_output.size * sizeof(float)),
+                expected_output_width,
+                expected_output_height,
+                channels,
+                1,
+                nullptr,
+                TensorLayout::Layout::NHWC
+            );
+
+            // Execute MaxPool operation
+            vulkan_ops::executeMaxPool(tensorInput, tensorOutput, width, height, channels,
+                                     poolSizeX, poolSizeY, strideX, strideY);
+
+            // Download result
+            tensorOutput.download(buf_output.ptr);
+        }
+        catch (const std::exception& e) {
+            throw std::runtime_error("MaxPool operation failed: " + std::string(e.what()));
+        }
+    }, "Execute MaxPool2D operation on Vulkan backend");
+
+    // BatchNorm operation
+    m.def("vulkan_batchnorm", [](
+        py::array_t<float> input,
+        py::array_t<float> gamma,
+        py::array_t<float> beta,
+        py::array_t<float> output,
+        uint32_t size,
+        float epsilon) {
+        try {
+            // Ensure input arrays are contiguous
+            if (!(input.flags() & py::array::c_style)) {
+                throw std::runtime_error("Input must be a contiguous array.");
+            }
+            if (!(gamma.flags() & py::array::c_style)) {
+                throw std::runtime_error("Gamma must be a contiguous array.");
+            }
+            if (!(beta.flags() & py::array::c_style)) {
+                throw std::runtime_error("Beta must be a contiguous array.");
+            }
+            if (!(output.flags() & py::array::c_style)) {
+                throw std::runtime_error("Output must be a contiguous array.");
+            }
+
+            auto buf_input = input.request();
+            auto buf_gamma = gamma.request();
+            auto buf_beta = beta.request();
+            auto buf_output = output.request();
+
+            if (buf_input.size != size || 
+                buf_gamma.size != size ||
+                buf_beta.size != size || 
+                buf_output.size != size) {
+                throw std::runtime_error(
+                    "Size mismatch. All input, gamma, beta, and output tensors must have size: " + 
+                    std::to_string(size)
+                );
+            }
+
+            auto context = vulkan_globals::getContext();
+
+            // Create VulkanTensor instances
+            VulkanTensor tensorInput(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_input.size * sizeof(float)),
+                1, 1, size, 1,
+                buf_input.ptr,
+                TensorLayout::Layout::LINEAR
+            );
+            VulkanTensor tensorGamma(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_gamma.size * sizeof(float)),
+                1, 1, size, 1,
+                buf_gamma.ptr,
+                TensorLayout::Layout::LINEAR
+            );
+            VulkanTensor tensorBeta(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_beta.size * sizeof(float)),
+                1, 1, size, 1,
+                buf_beta.ptr,
+                TensorLayout::Layout::LINEAR
+            );
+            VulkanTensor tensorOutput(
+                context->getMemoryManager(),
+                context->getBufferPool(),
+                checkSize(buf_output.size * sizeof(float)),
+                1, 1, size, 1,
+                nullptr,
+                TensorLayout::Layout::LINEAR
+            );
+
+            // Execute BatchNorm operation
+            vulkan_ops::executeBatchNorm(tensorInput, tensorGamma, tensorBeta, tensorOutput, size, epsilon);
+
+            // Download result
+            tensorOutput.download(buf_output.ptr);
+        }
+        catch (const std::exception& e) {
+            throw std::runtime_error("BatchNorm operation failed: " + std::string(e.what()));
+        }
+    }, "Execute BatchNorm operation on Vulkan backend");
+
+    // Model operations
+    m.def("save_model", [](const std::string& filename) -> void {
+        throw std::runtime_error("Model saving not yet implemented.");
+    }, "Save the current model to a file");
+
+    m.def("load_model", [](const std::string& filename) -> void {
+        throw std::runtime_error("Model loading not yet implemented.");
+    }, "Load a model from a file");
+
+    m.def("initialize_distributed", [](uint32_t num_gpus) -> void {
+        throw std::runtime_error("Distributed training not yet implemented.");
+    }, "Initialize distributed training");
+
+    m.def("enable_gradient_checkpointing", []() -> void {
+        throw std::runtime_error("Gradient checkpointing not yet implemented.");
+    }, "Enable gradient checkpointing");
+}
+// src\vulkan_globals.cpp
+#include "vulkan_globals.h"
+#include "spdlog/spdlog.h"
+
+// Global Vulkan objects
+namespace vulkan_globals {
+    VkInstance instance = VK_NULL_HANDLE;
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    VkDevice device = VK_NULL_HANDLE;
+    VkQueue computeQueue = VK_NULL_HANDLE;
+    VkQueue graphicsQueue = VK_NULL_HANDLE;
+    VkCommandPool commandPool = VK_NULL_HANDLE;
+    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+
+    std::unique_ptr<VulkanContext> vulkanContextInstance = nullptr;
+
+    bool initializeVulkan() {
+        try {
+            if (!vulkanContextInstance) {
+                spdlog::info("Initializing VulkanContext...");
+                vulkanContextInstance = std::make_unique<VulkanContext>();
+                vulkanContextInstance->initVulkan();
+            }
+            spdlog::info("VulkanContext initialized successfully.");
+            return true;
+        } catch (const std::exception& e) {
+            spdlog::error("Failed to initialize VulkanContext: {}", e.what());
+            return false;
+        }
+    }
+
+    void cleanupVulkan() {
+        if (vulkanContextInstance) {
+            spdlog::info("Cleaning up VulkanContext...");
+            vulkanContextInstance->cleanupVulkan();
+            vulkanContextInstance.reset();
+            spdlog::info("VulkanContext cleanup complete.");
+        }
+    }
+
+    VulkanContext* getContext() {
+        return vulkanContextInstance.get();
+    }
+}
+
