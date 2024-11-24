@@ -169,6 +169,7 @@ set(SOURCES
     src/VulkanSync.cpp
     src/vulkan_globals.cpp
     src/VulkanOperations.cpp
+	src/VulkanTensor.cpp
     ${ONNX_GENERATED_SOURCES}
 )
 
@@ -187,6 +188,7 @@ set(HEADERS
     src/PushConstants.h
     src/Utils.h
     src/vulkan_globals.h
+	src/VulkanDeviceHelper.h
     src/VulkanOperations.h
 )
 

@@ -1,6 +1,9 @@
 #include "VulkanSync.h"
 
-ScopedGPUWait::ScopedGPUWait(VkDevice device) : deviceRef(device), fence(VK_NULL_HANDLE) {
+namespace VulkanSync {
+
+ScopedGPUWait::ScopedGPUWait(VkDevice device) 
+    : deviceRef(device), fence(VK_NULL_HANDLE) {
     VkFenceCreateInfo fenceInfo = {};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fenceInfo.flags = 0;
@@ -37,3 +40,5 @@ void ScopedGPUWait::wait() const {
 VkFence ScopedGPUWait::get() const {
     return fence;
 }
+
+} // namespace VulkanSync

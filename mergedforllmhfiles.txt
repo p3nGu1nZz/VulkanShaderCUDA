@@ -247,7 +247,6 @@ private:
 
 #endif // VULKAN_BUFFER_POOL_H
 // src\VulkanContext.h
-// src\VulkanContext.h
 #ifndef VULKAN_CONTEXT_H
 #define VULKAN_CONTEXT_H
 
@@ -259,14 +258,13 @@ private:
 #include "VulkanMemoryManager.h"
 #include "VulkanBufferPool.h"
 
-// VulkanContext: Manages Vulkan resources and operations
 class VulkanContext {
 public:
     VulkanContext();
     ~VulkanContext();
 
-    void initVulkan();    // Initialize Vulkan resources
-    void cleanupVulkan(); // Cleanup Vulkan resources
+    void initVulkan();
+    void cleanupVulkan();
 
     // Accessors
     VulkanMemoryManager* getMemoryManager() const { return memoryManager.get(); }
@@ -275,31 +273,63 @@ public:
     CommandBufferManager* getCommandBufferManager() const { return commandBufferManager.get(); }
     std::shared_ptr<DescriptorSetManager> getDescriptorSetManager() const { return descriptorSetManager; }
     
-    VkDevice getDevice() const { return device; } // Added getter for VkDevice
+    // Device accessors
+    VkDevice getDevice() const { return device; }
+    VkPhysicalDevice getPhysicalDevice() const { return physicalDevice; }
 
 private:
-    // Vulkan instance and devices
     VkInstance instance;
     VkPhysicalDevice physicalDevice;
     VkDevice device;
     VkQueue computeQueue;
     uint32_t computeQueueFamilyIndex;
 
-    // Managers
     std::unique_ptr<VulkanMemoryManager> memoryManager;
     std::unique_ptr<VulkanBufferPool> bufferPool;
     std::unique_ptr<PipelineManager> pipelineManager;
     std::unique_ptr<CommandBufferManager> commandBufferManager;
     std::shared_ptr<DescriptorSetManager> descriptorSetManager;
 
-    // Helper functions
     void pickPhysicalDevice();
     void createLogicalDevice();
     void findComputeQueueFamily();
 };
 
 #endif // VULKAN_CONTEXT_H
+// src\VulkanDeviceHelper.h
+// VulkanDeviceHelper.h
+#ifndef VULKAN_DEVICE_HELPER_H
+#define VULKAN_DEVICE_HELPER_H
 
+#include <vulkan/vulkan.h>
+#include <vector>
+
+class VulkanDeviceHelper {
+public:
+    static VkPhysicalDeviceProperties getPhysicalDeviceProperties(VkPhysicalDevice device) {
+        VkPhysicalDeviceProperties properties;
+        vkGetPhysicalDeviceProperties(device, &properties);
+        return properties;
+    }
+
+    static uint32_t findComputeQueueFamily(VkPhysicalDevice device) {
+        uint32_t queueFamilyCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
+
+        std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
+
+        for (uint32_t i = 0; i < queueFamilies.size(); i++) {
+            if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+                return i;
+            }
+        }
+
+        throw std::runtime_error("Could not find a compute queue family.");
+    }
+};
+
+#endif // VULKAN_DEVICE_HELPER_H
 // src\VulkanError.h
 #ifndef VULKAN_ERROR_H
 #define VULKAN_ERROR_H
@@ -356,6 +386,7 @@ private:
 
 #endif // VULKAN_MEMORY_MANAGER_H
 // src\VulkanOperations.h
+// src\VulkanOperations.h
 #ifndef VULKAN_OPERATIONS_H
 #define VULKAN_OPERATIONS_H
 
@@ -403,28 +434,163 @@ namespace vulkan_ops {
 #endif // VULKAN_OPERATIONS_H
 
 // src\VulkanSync.h
+// VulkanSync.h
 #ifndef VULKAN_SYNC_H
 #define VULKAN_SYNC_H
 
 #include <vulkan/vulkan.h>
 #include "VulkanError.h"
 
-class ScopedGPUWait {
-private:
-    VkFence fence;
-    VkDevice deviceRef;
+namespace VulkanSync {
+    // Wrapper class for managing Vulkan memory barriers 
+    class MemoryBarrier {
+    public:
+        static VkMemoryBarrier getBarrier(VkAccessFlags srcAccess, VkAccessFlags dstAccess) {
+            VkMemoryBarrier barrier = {};
+            barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            barrier.srcAccessMask = srcAccess;
+            barrier.dstAccessMask = dstAccess;
+            return barrier;
+        }
 
-public:
-    ScopedGPUWait(VkDevice device);
-    ~ScopedGPUWait();
+        static VkBufferMemoryBarrier getBufferBarrier(
+            VkBuffer buffer,
+            VkAccessFlags srcAccess,
+            VkAccessFlags dstAccess,
+            VkDeviceSize offset,
+            VkDeviceSize size
+        ) {
+            VkBufferMemoryBarrier barrier = {};
+            barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            barrier.srcAccessMask = srcAccess;
+            barrier.dstAccessMask = dstAccess;
+            barrier.buffer = buffer;
+            barrier.offset = offset;
+            barrier.size = size;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            return barrier;
+        }
 
-    VkFence get() const;
-    void wait() const;
+        static void cmdPipelineBarrier(
+            VkCommandBuffer cmdBuffer,
+            VkPipelineStageFlags srcStage,
+            VkPipelineStageFlags dstStage,
+            const VkBufferMemoryBarrier& bufferBarrier
+        ) {
+            vkCmdPipelineBarrier(
+                cmdBuffer,
+                srcStage,
+                dstStage,
+                0,
+                0, nullptr,
+                1, &bufferBarrier,
+                0, nullptr
+            );
+        }
+    };
 
-    // Delete copy constructors
-    ScopedGPUWait(const ScopedGPUWait&) = delete;
-    ScopedGPUWait& operator=(const ScopedGPUWait&) = delete;
-};
+    // RAII wrapper for GPU fence synchronization
+    class ScopedGPUWait {
+    private:
+        VkFence fence;
+        VkDevice deviceRef;
+
+    public:
+        ScopedGPUWait(VkDevice device) : deviceRef(device), fence(VK_NULL_HANDLE) {
+            VkFenceCreateInfo fenceInfo = {};
+            fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            
+            VkResult result = vkCreateFence(deviceRef, &fenceInfo, nullptr, &fence);
+            if (result != VK_SUCCESS) {
+                throw VulkanError("Failed to create fence during ScopedGPUWait.");
+            }
+        }
+
+        ~ScopedGPUWait() {
+            if (fence != VK_NULL_HANDLE) {
+                vkDestroyFence(deviceRef, fence, nullptr);
+                fence = VK_NULL_HANDLE;
+            }
+        }
+
+        void wait() const {
+            if (fence == VK_NULL_HANDLE) {
+                throw VulkanError("Attempting to wait on null fence.");
+            }
+
+            VkResult result = vkWaitForFences(deviceRef, 1, &fence, VK_TRUE, UINT64_MAX);
+            if (result != VK_SUCCESS) {
+                throw VulkanError("Failed to wait for fence in ScopedGPUWait.");
+            }
+
+            result = vkResetFences(deviceRef, 1, &fence);
+            if (result != VK_SUCCESS) {
+                throw VulkanError("Failed to reset fence in ScopedGPUWait.");
+            }
+        }
+
+        VkFence get() const { return fence; }
+
+        // Delete copy operations
+        ScopedGPUWait(const ScopedGPUWait&) = delete;
+        ScopedGPUWait& operator=(const ScopedGPUWait&) = delete;
+    };
+
+    // Memory barrier utilities
+    namespace Barriers {
+        inline void recordUploadBarriers(VkCommandBuffer cmdBuffer, VkBuffer buffer, VkDeviceSize size) {
+            auto barrier = MemoryBarrier::getBufferBarrier(
+                buffer,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_HOST_WRITE_BIT,
+                0,
+                size
+            );
+
+            MemoryBarrier::cmdPipelineBarrier(
+                cmdBuffer,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                barrier
+            );
+        }
+
+        inline void recordDownloadBarriers(VkCommandBuffer cmdBuffer, VkBuffer buffer, VkDeviceSize size) {
+            auto barrier = MemoryBarrier::getBufferBarrier(
+                buffer,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+                0,
+                size
+            );
+
+            MemoryBarrier::cmdPipelineBarrier(
+                cmdBuffer,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                barrier
+            );
+        }
+
+        inline void recordExecutionBarriers(VkCommandBuffer cmdBuffer, VkBuffer buffer, VkDeviceSize size) {
+            auto barrier = MemoryBarrier::getBufferBarrier(
+                buffer,
+                VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                0,
+                size
+            );
+
+            MemoryBarrier::cmdPipelineBarrier(
+                cmdBuffer,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                barrier
+            );
+        }
+    }
+}
 
 #endif // VULKAN_SYNC_H
 // src\VulkanTensor.h
@@ -436,6 +602,8 @@ public:
 #include <string>
 #include <stdexcept>
 #include <cstring>
+#include <algorithm>
+#include <iostream>
 #include "VulkanMemoryManager.h"
 #include "PushConstants.h"
 #include "Utils.h"
@@ -443,8 +611,9 @@ public:
 #include "PipelineManager.h"
 #include "CommandBufferManager.h"
 #include "vulkan_globals.h"
+#include "VulkanSync.h"
+#include "VulkanDeviceHelper.h"
 
-// Tensor Layout Namespace
 namespace TensorLayout {
     enum class Layout {
         NHWC,  // Batch, Height, Width, Channels
@@ -461,240 +630,71 @@ namespace TensorLayout {
     };
 }
 
-// Vulkan Sync Namespace
-namespace VulkanSync {
-    class ScopedGPUWait {
-    private:
-        VkFence fence;
-        VkDevice deviceRef;
-
-    public:
-        ScopedGPUWait(VkDevice device) : deviceRef(device) {
-            VkFenceCreateInfo fenceInfo = {};
-            fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-            fenceInfo.flags = 0;
-
-            VkResult result = vkCreateFence(deviceRef, &fenceInfo, nullptr, &fence);
-            if (result != VK_SUCCESS) {
-                throw std::runtime_error("Failed to create fence during ScopedGPUWait.");
-            }
-        }
-
-        ~ScopedGPUWait() {
-            if (fence != VK_NULL_HANDLE) {
-                vkDestroyFence(deviceRef, fence, nullptr);
-            }
-        }
-
-        VkFence get() const { return fence; }
-
-        void wait() const {
-            VkResult result = vkWaitForFences(deviceRef, 1, &fence, VK_TRUE, UINT64_MAX);
-            if (result != VK_SUCCESS) {
-                throw std::runtime_error("Failed to wait for fence in ScopedGPUWait.");
-            }
-        }
-
-        // Delete copy constructors
-        ScopedGPUWait(const ScopedGPUWait&) = delete;
-        ScopedGPUWait& operator=(const ScopedGPUWait&) = delete;
-    };
-};
-
 class VulkanTensor {
 private:
-    VulkanMemoryManager::AllocationInfo allocation; // Memory allocation info
-    TensorLayout::Dimensions dimensions;            // Tensor dimensions
-    VkBuffer buffer;                                // Vulkan buffer handle
-    VulkanBufferPool* bufferPoolPtr;                // Pointer to the buffer pool
-    VkDevice deviceRef;                             // Vulkan device reference
+    VulkanMemoryManager::AllocationInfo allocation;
+    TensorLayout::Dimensions dimensions;
+    VkBuffer buffer;
+    VulkanBufferPool* bufferPoolPtr;
+    VkDevice deviceRef;
+
+    void cleanup();
 
 public:
-    // Default constructor for pybind11
-    VulkanTensor()
-        : allocation{nullptr, 0, 0}, dimensions{0, 0, 0, 0, TensorLayout::Layout::LINEAR},
-          buffer(VK_NULL_HANDLE), bufferPoolPtr(nullptr), deviceRef(vulkan_globals::device) {}
+    // Default constructor
+    VulkanTensor();
 
-    VulkanTensor(VulkanMemoryManager* memoryManager, 
-                 VulkanBufferPool* bufferPool, 
+    // Main constructor
+    VulkanTensor(VulkanMemoryManager* memoryManager,
+                 VulkanBufferPool* bufferPool,
                  VkDeviceSize size,
-                 uint32_t w = 1, 
-                 uint32_t h = 1, 
-                 uint32_t c = 1, 
+                 uint32_t w = 1,
+                 uint32_t h = 1,
+                 uint32_t c = 1,
                  uint32_t n = 1,
-                 const void* data = nullptr, 
-                 TensorLayout::Layout layout = TensorLayout::Layout::LINEAR)
-        : dimensions{n, h, w, c, layout}
-        , bufferPoolPtr(bufferPool)
-        , deviceRef(vulkan_globals::device) {
-        
-        if (deviceRef == VK_NULL_HANDLE) {
-            throw std::runtime_error("Vulkan device not initialized.");
-        }
-
-        // Allocate memory
-        allocation = memoryManager->allocate(
-            size, 
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-        );
-        
-        // Create buffer
-        VkBufferCreateInfo bufferInfo = {};
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = size;
-        bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | 
-                           VK_BUFFER_USAGE_TRANSFER_DST_BIT | 
-                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-        VkResult result = vkCreateBuffer(deviceRef, &bufferInfo, nullptr, &buffer);
-        if (result != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create buffer in VulkanTensor.");
-        }
-
-        // Bind buffer memory
-        result = vkBindBufferMemory(deviceRef, buffer, allocation.memory, allocation.offset);
-        if (result != VK_SUCCESS) {
-            vkDestroyBuffer(deviceRef, buffer, nullptr);
-            throw std::runtime_error("Failed to bind buffer memory in VulkanTensor.");
-        }
-
-        // Upload data if provided
-        if (data) {
-            upload(data);
-        }
-    }
+                 const void* data = nullptr,
+                 TensorLayout::Layout layout = TensorLayout::Layout::LINEAR);
 
     // Move constructor
-    VulkanTensor(VulkanTensor&& other) noexcept
-        : allocation(other.allocation)
-        , dimensions(other.dimensions)
-        , buffer(other.buffer)
-        , bufferPoolPtr(other.bufferPoolPtr)
-        , deviceRef(other.deviceRef) {
-        other.buffer = VK_NULL_HANDLE;
-        other.bufferPoolPtr = nullptr;
-    }
+    VulkanTensor(VulkanTensor&& other) noexcept;
 
     // Move assignment operator
-    VulkanTensor& operator=(VulkanTensor&& other) noexcept {
-        if (this != &other) {
-            cleanup();
-
-            allocation = other.allocation;
-            dimensions = other.dimensions;
-            buffer = other.buffer;
-            bufferPoolPtr = other.bufferPoolPtr;
-            deviceRef = other.deviceRef;
-
-            other.buffer = VK_NULL_HANDLE;
-            other.bufferPoolPtr = nullptr;
-        }
-        return *this;
-    }
+    VulkanTensor& operator=(VulkanTensor&& other) noexcept;
 
     // Destructor
-    ~VulkanTensor() {
-        cleanup();
-    }
+    ~VulkanTensor();
 
     // Delete copy constructor and assignment
     VulkanTensor(const VulkanTensor&) = delete;
     VulkanTensor& operator=(const VulkanTensor&) = delete;
 
-    // Upload data to Vulkan buffer
-    void upload(const void* data) {
-        if (!data) {
-            throw std::runtime_error("Null pointer provided for upload.");
-        }
-
-        void* mappedMemory;
-        VkResult result = vkMapMemory(deviceRef, allocation.memory, allocation.offset, allocation.size, 0, &mappedMemory);
-        if (result != VK_SUCCESS) {
-            throw std::runtime_error("Failed to map memory for upload in VulkanTensor.");
-        }
-
-        memcpy(mappedMemory, data, static_cast<size_t>(allocation.size));
-
-        VkMappedMemoryRange memoryRange = {};
-        memoryRange.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-        memoryRange.memory = allocation.memory;
-        memoryRange.offset = allocation.offset;
-        memoryRange.size = allocation.size;
-        vkFlushMappedMemoryRanges(deviceRef, 1, &memoryRange);
-
-        vkUnmapMemory(deviceRef, allocation.memory);
-    }
-
-    // Download data from Vulkan buffer
-    void download(void* data) const {
-        if (!data) {
-            throw std::runtime_error("Null pointer provided for download.");
-        }
-
-        void* mappedMemory;
-        VkResult result = vkMapMemory(deviceRef, allocation.memory, allocation.offset, allocation.size, 0, &mappedMemory);
-        if (result != VK_SUCCESS) {
-            throw std::runtime_error("Failed to map memory for download in VulkanTensor.");
-        }
-
-        VkMappedMemoryRange memoryRange = {};
-        memoryRange.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-        memoryRange.memory = allocation.memory;
-        memoryRange.offset = allocation.offset;
-        memoryRange.size = allocation.size;
-        vkInvalidateMappedMemoryRanges(deviceRef, 1, &memoryRange);
-
-        memcpy(data, mappedMemory, static_cast<size_t>(allocation.size));
-        vkUnmapMemory(deviceRef, allocation.memory);
-    }
+    // Data transfer methods
+    void upload(const void* data);
+    void download(void* data) const;
 
     // Getters
-    uint32_t getN() const { return dimensions.n; }
-    uint32_t getC() const { return dimensions.c; }
-    uint32_t getH() const { return dimensions.h; }
-    uint32_t getW() const { return dimensions.w; }
-    uint32_t getWidth() const { return dimensions.w; }
-    uint32_t getHeight() const { return dimensions.h; }
-    uint32_t getChannels() const { return dimensions.c; }
-    VkDeviceSize getSize() const { return allocation.size; }
-    VkBuffer getBuffer() const { return buffer; }
+    uint32_t getN() const;
+    uint32_t getC() const;
+    uint32_t getH() const;
+    uint32_t getW() const;
+    uint32_t getWidth() const;
+    uint32_t getHeight() const;
+    uint32_t getChannels() const;
+    VkDeviceSize getSize() const;
+    VkBuffer getBuffer() const;
 
-    // Layout Getters and Setters
-    TensorLayout::Layout getLayout() const { return dimensions.layout; }
-    void setLayout(TensorLayout::Layout newLayout) { dimensions.layout = newLayout; }
+    // Layout methods
+    TensorLayout::Layout getLayout() const;
+    void setLayout(TensorLayout::Layout newLayout);
 
     // Utility methods
-    bool isValid() const {
-        return buffer != VK_NULL_HANDLE && allocation.memory != VK_NULL_HANDLE;
-    }
-
-    std::string getDimensionsString() const {
-        return "(" + std::to_string(dimensions.n) + ", " +
-               std::to_string(dimensions.c) + ", " +
-               std::to_string(dimensions.h) + ", " +
-               std::to_string(dimensions.w) + ")";
-    }
-
-    bool verifyDimensions(VkDeviceSize expectedSize) const {
-        return allocation.size == expectedSize &&
-               (dimensions.w * dimensions.h * dimensions.c * dimensions.n * sizeof(float)) == expectedSize;
-    }
-
-private:
-    void cleanup() {
-        if (buffer != VK_NULL_HANDLE) {
-            if (bufferPoolPtr) {
-                bufferPoolPtr->releaseBuffer(buffer);
-            }
-            vkDestroyBuffer(deviceRef, buffer, nullptr);
-            buffer = VK_NULL_HANDLE;
-        }
-    }
+    bool isValid() const;
+    std::string getDimensionsString() const;
+    bool verifyDimensions(VkDeviceSize expectedSize) const;
+    void debugPrint() const;
 };
 
 #endif // VULKAN_TENSOR_H
-
 // src\vulkan_globals.h
 #ifndef VULKAN_GLOBALS_H
 #define VULKAN_GLOBALS_H

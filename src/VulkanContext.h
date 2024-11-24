@@ -1,4 +1,3 @@
-// src\VulkanContext.h
 #ifndef VULKAN_CONTEXT_H
 #define VULKAN_CONTEXT_H
 
@@ -10,14 +9,13 @@
 #include "VulkanMemoryManager.h"
 #include "VulkanBufferPool.h"
 
-// VulkanContext: Manages Vulkan resources and operations
 class VulkanContext {
 public:
     VulkanContext();
     ~VulkanContext();
 
-    void initVulkan();    // Initialize Vulkan resources
-    void cleanupVulkan(); // Cleanup Vulkan resources
+    void initVulkan();
+    void cleanupVulkan();
 
     // Accessors
     VulkanMemoryManager* getMemoryManager() const { return memoryManager.get(); }
@@ -26,24 +24,23 @@ public:
     CommandBufferManager* getCommandBufferManager() const { return commandBufferManager.get(); }
     std::shared_ptr<DescriptorSetManager> getDescriptorSetManager() const { return descriptorSetManager; }
     
-    VkDevice getDevice() const { return device; } // Added getter for VkDevice
+    // Device accessors
+    VkDevice getDevice() const { return device; }
+    VkPhysicalDevice getPhysicalDevice() const { return physicalDevice; }
 
 private:
-    // Vulkan instance and devices
     VkInstance instance;
     VkPhysicalDevice physicalDevice;
     VkDevice device;
     VkQueue computeQueue;
     uint32_t computeQueueFamilyIndex;
 
-    // Managers
     std::unique_ptr<VulkanMemoryManager> memoryManager;
     std::unique_ptr<VulkanBufferPool> bufferPool;
     std::unique_ptr<PipelineManager> pipelineManager;
     std::unique_ptr<CommandBufferManager> commandBufferManager;
     std::shared_ptr<DescriptorSetManager> descriptorSetManager;
 
-    // Helper functions
     void pickPhysicalDevice();
     void createLogicalDevice();
     void findComputeQueueFamily();

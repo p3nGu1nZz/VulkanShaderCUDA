@@ -1,5 +1,4 @@
 // src\vulkan_backend_bindings.cpp
-
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -153,7 +152,6 @@ PYBIND11_MODULE(vulkan_backend, m) {
                                        static_cast<size_t>(self.getC()) *
                                        static_cast<size_t>(self.getH()) *
                                        static_cast<size_t>(self.getW());
-
                 if (input.size() != expected_size) {
                     throw std::runtime_error("Input array size does not match VulkanTensor size.");
                 }
@@ -173,7 +171,8 @@ PYBIND11_MODULE(vulkan_backend, m) {
                      static_cast<int64_t>(self.getW()) };
         }, "Get the shape of the tensor.")
         .def("get_layout", &VulkanTensor::getLayout, "Get the tensor layout.")
-        .def("set_layout", &VulkanTensor::setLayout, "Set the tensor layout.");
+        .def("set_layout", &VulkanTensor::setLayout, "Set the tensor layout.")
+        .def("debug_print", &VulkanTensor::debugPrint, "Print first few elements of the tensor for debugging.");
 
     // -----------------------------
     // Factory Function to Create VulkanTensor
@@ -644,7 +643,7 @@ PYBIND11_MODULE(vulkan_backend, m) {
     // -----------------------------
     m.def("vulkan_maxpool", [](py::array_t<float> input, py::array_t<float> output,
                               uint32_t width, uint32_t height, uint32_t channels,
-                              uint32_t poolSizeX, uint32_t poolSizeY,
+                              uint32_t poolSizeX, uint32_t poolSizeY, 
                               uint32_t strideX, uint32_t strideY) {
         try {
             // Ensure Vulkan is initialized

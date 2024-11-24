@@ -1,14 +1,40 @@
 // comp\add.comp
 #version 450
-layout(set = 0, binding = 0) readonly buffer BufferA { float a[]; };
-layout(set = 0, binding = 1) readonly buffer BufferB { float b[]; };
-layout(set = 0, binding = 2) writeonly buffer BufferC { float c[]; };
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer InputA {
+    float data[];
+} inputA;
+
+layout(std430, binding = 1) readonly buffer InputB {
+    float data[];
+} inputB;
+
+layout(std430, binding = 2) writeonly buffer Output {
+    float data[];
+} output_buf;
+
+layout(push_constant) uniform PushConstants {
+    uint total_elements;
+} pc;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    c[idx] = a[idx] + b[idx];
+    if (idx >= pc.total_elements) return;
+    
+    // Add memory barriers to ensure data is properly synchronized
+    memoryBarrier();
+    barrier();
+    
+    float a = inputA.data[idx];
+    float b = inputB.data[idx];
+    float result = a + b;
+    
+    memoryBarrier();
+    barrier();
+    
+    output_buf.data[idx] = result;
 }
-
 // comp\add_grad.comp
 #version 450
 layout(local_size_x = 256) in;

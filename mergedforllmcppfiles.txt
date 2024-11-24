@@ -1,12 +1,15 @@
 // src\CommandBufferManager.cpp
+// src\CommandBufferManager.cpp
 #include "CommandBufferManager.h"
 #include "spdlog/spdlog.h"
 
+// Constructor
 CommandBufferManager::CommandBufferManager(VkDevice device, VkCommandPool commandPool)
     : device(device), commandPool(commandPool) {
     spdlog::info("CommandBufferManager created.");
 }
 
+// Destructor: Cleans up all command buffers in the pool
 CommandBufferManager::~CommandBufferManager() {
     std::lock_guard<std::mutex> lock(mutex);
 
@@ -18,12 +21,14 @@ CommandBufferManager::~CommandBufferManager() {
     spdlog::info("CommandBufferManager destroyed.");
 }
 
+// Acquire a command buffer from the pool or allocate a new one if the pool is empty
 VkCommandBuffer CommandBufferManager::acquireCommandBuffer() {
     std::lock_guard<std::mutex> lock(mutex);
 
     if (!commandBuffers.empty()) {
         VkCommandBuffer cmd = commandBuffers.front();
         commandBuffers.pop();
+        spdlog::debug("Acquired command buffer from pool.");
         return cmd;
     }
 
@@ -38,14 +43,18 @@ VkCommandBuffer CommandBufferManager::acquireCommandBuffer() {
         throw std::runtime_error("Failed to allocate command buffer.");
     }
 
+    spdlog::debug("Allocated new command buffer.");
     return cmdBuffer;
 }
 
+// Release a command buffer back to the pool for reuse
 void CommandBufferManager::releaseCommandBuffer(VkCommandBuffer cmd) {
     std::lock_guard<std::mutex> lock(mutex);
     commandBuffers.push(cmd);
+    spdlog::debug("Released command buffer back to pool.");
 }
 
+// src\DescriptorSetManager.cpp
 // src\DescriptorSetManager.cpp
 #include "DescriptorSetManager.h"
 #include "spdlog/spdlog.h"
@@ -75,40 +84,59 @@ VkDescriptorSet DescriptorSetManager::allocateDescriptorSet() {
 }
 
 void DescriptorSetManager::updateDescriptorSet(VkDescriptorSet descriptorSet, const std::vector<VkBuffer>& inputBuffers, VkBuffer outputBuffer) {
-    std::vector<VkDescriptorBufferInfo> bufferInfos(inputBuffers.size());
+    std::vector<VkDescriptorBufferInfo> bufferInfos;
+    std::vector<VkWriteDescriptorSet> descriptorWrites;
 
+    // Reserve space to avoid reallocations
+    bufferInfos.reserve(inputBuffers.size() + 1);
+    descriptorWrites.reserve(inputBuffers.size() + 1);
+
+    // Process input buffers
     for (size_t i = 0; i < inputBuffers.size(); i++) {
-        bufferInfos[i].buffer = inputBuffers[i];
-        bufferInfos[i].offset = 0;
-        bufferInfos[i].range = VK_WHOLE_SIZE;
+        VkDescriptorBufferInfo bufferInfo = {};
+        bufferInfo.buffer = inputBuffers[i];
+        bufferInfo.offset = 0;
+        bufferInfo.range = VK_WHOLE_SIZE;
+        bufferInfos.push_back(bufferInfo);
+
+        VkWriteDescriptorSet writeDescriptor = {};
+        writeDescriptor.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writeDescriptor.dstSet = descriptorSet;
+        writeDescriptor.dstBinding = static_cast<uint32_t>(i); // Binding index for input buffers
+        writeDescriptor.dstArrayElement = 0;
+        writeDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writeDescriptor.descriptorCount = 1;
+        writeDescriptor.pBufferInfo = &bufferInfos.back();
+        descriptorWrites.push_back(writeDescriptor);
     }
 
-    VkDescriptorBufferInfo outputBufferInfo = {};
-    outputBufferInfo.buffer = outputBuffer;
-    outputBufferInfo.offset = 0;
-    outputBufferInfo.range = VK_WHOLE_SIZE;
+    // Add output buffer
+    if (outputBuffer != VK_NULL_HANDLE) {
+        VkDescriptorBufferInfo outputBufferInfo = {};
+        outputBufferInfo.buffer = outputBuffer;
+        outputBufferInfo.offset = 0;
+        outputBufferInfo.range = VK_WHOLE_SIZE;
+        bufferInfos.push_back(outputBufferInfo);
 
-    std::vector<VkWriteDescriptorSet> descriptorWrites(bufferInfos.size() + 1);
-
-    for (size_t i = 0; i < bufferInfos.size(); i++) {
-        descriptorWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrites[i].dstSet = descriptorSet;
-        descriptorWrites[i].dstBinding = static_cast<uint32_t>(i);
-        descriptorWrites[i].dstArrayElement = 0;
-        descriptorWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        descriptorWrites[i].descriptorCount = 1;
-        descriptorWrites[i].pBufferInfo = &bufferInfos[i];
+        VkWriteDescriptorSet writeDescriptor = {};
+        writeDescriptor.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writeDescriptor.dstSet = descriptorSet;
+        writeDescriptor.dstBinding = static_cast<uint32_t>(inputBuffers.size()); // Binding index for output buffer
+        writeDescriptor.dstArrayElement = 0;
+        writeDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writeDescriptor.descriptorCount = 1;
+        writeDescriptor.pBufferInfo = &bufferInfos.back();
+        descriptorWrites.push_back(writeDescriptor);
     }
 
-    descriptorWrites.back().sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    descriptorWrites.back().dstSet = descriptorSet;
-    descriptorWrites.back().dstBinding = static_cast<uint32_t>(bufferInfos.size());
-    descriptorWrites.back().dstArrayElement = 0;
-    descriptorWrites.back().descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    descriptorWrites.back().descriptorCount = 1;
-    descriptorWrites.back().pBufferInfo = &outputBufferInfo;
-
-    vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+    // Update all descriptors at once
+    vkUpdateDescriptorSets(
+        device,
+        static_cast<uint32_t>(descriptorWrites.size()),
+        descriptorWrites.data(),
+        0,
+        nullptr
+    );
 }
 
 // src\OnnxModelParser.cpp
@@ -151,29 +179,14 @@ onnx::TensorProto OnnxModelParser::getInitializer(const std::string& name) const
     throw std::runtime_error("Initializer not found: " + name);
 }
 // src\PipelineManager.cpp
-// PipelineManager.cpp
-
+// src\PipelineManager.cpp
 #include "PipelineManager.h"
 #include "vulkan_globals.h"
 #include "spdlog/spdlog.h"
 #include <fstream>
 #include <filesystem>
 
-PipelineManager::PipelineManager(std::shared_ptr<ShaderManager> shaderManager, VkDevice device)
-    : shaderManager(shaderManager), device(device) {}
-
-PipelineManager::~PipelineManager() {
-    // Clean up pipelines
-    for (auto& [key, pipeline] : pipelines) {
-        vkDestroyPipeline(device, pipeline, nullptr);
-    }
-
-    // Clean up pipeline layouts
-    for (auto& [key, layout] : pipelineLayouts) {
-        vkDestroyPipelineLayout(device, layout, nullptr);
-    }
-}
-
+// Hash function implementation
 std::size_t PipelineKeyHash::operator()(const PipelineKey& key) const {
     std::size_t res = std::hash<int>()(static_cast<int>(key.opType));
     
@@ -193,6 +206,23 @@ std::size_t PipelineKeyHash::operator()(const PipelineKey& key) const {
     res ^= std::hash<uint32_t>()(key.workgroupSizeZ) + 0x9e3779b9 + (res << 6) + (res >> 2);
 
     return res;
+}
+
+PipelineManager::PipelineManager(std::shared_ptr<ShaderManager> shaderManager, VkDevice device)
+    : shaderManager(shaderManager), device(device) {}
+
+PipelineManager::~PipelineManager() {
+    // Clean up pipelines
+    for (auto& [key, pipeline] : pipelines) {
+        vkDestroyPipeline(device, pipeline, nullptr);
+        spdlog::info("Pipeline destroyed.");
+    }
+
+    // Clean up pipeline layouts
+    for (auto& [key, layout] : pipelineLayouts) {
+        vkDestroyPipelineLayout(device, layout, nullptr);
+        spdlog::info("Pipeline layout destroyed.");
+    }
 }
 
 std::string PipelineManager::getShaderName(VulkanOperationType opType) const {
@@ -264,17 +294,16 @@ VkPipeline PipelineManager::getPipeline(const PipelineKey& key) {
 
     // Store and return the created pipeline
     pipelines[key] = pipeline;
+    spdlog::info("Compute pipeline created for operation type: {}", static_cast<int>(key.opType));
     return pipeline;
 }
 
 VkPipelineLayout PipelineManager::getPipelineLayout(const PipelineKey& key) {
-    // Check if pipeline layout already exists
     auto it = pipelineLayouts.find(key);
     if (it != pipelineLayouts.end()) {
         return it->second;
     }
 
-    // Define push constants based on the operation type
     VkPushConstantRange pushConstantRange = {};
     pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
@@ -307,10 +336,47 @@ VkPipelineLayout PipelineManager::getPipelineLayout(const PipelineKey& key) {
             pushConstantRange.size = 0;
     }
 
+    // Create descriptor set layout
+    std::vector<VkDescriptorSetLayoutBinding> bindings = {
+        {
+            0,                                  // binding
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  // descriptorType
+            1,                                  // descriptorCount
+            VK_SHADER_STAGE_COMPUTE_BIT,       // stageFlags
+            nullptr                            // pImmutableSamplers
+        },
+        {
+            1,                                  // binding
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  // descriptorType
+            1,                                  // descriptorCount
+            VK_SHADER_STAGE_COMPUTE_BIT,       // stageFlags
+            nullptr                            // pImmutableSamplers
+        },
+        {
+            2,                                  // binding
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  // descriptorType
+            1,                                  // descriptorCount
+            VK_SHADER_STAGE_COMPUTE_BIT,       // stageFlags
+            nullptr                            // pImmutableSamplers
+        }
+    };
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+    layoutInfo.pBindings = bindings.data();
+
+    VkDescriptorSetLayout descriptorSetLayout;
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout) != VK_SUCCESS) {
+        throw VulkanError("Failed to create descriptor set layout");
+    }
+
+    // Create pipeline layout
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount = 0; // No descriptor sets used in this example
-    pipelineLayoutInfo.pSetLayouts = nullptr;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
+    
     if (pushConstantRange.size > 0) {
         pipelineLayoutInfo.pushConstantRangeCount = 1;
         pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
@@ -319,30 +385,29 @@ VkPipelineLayout PipelineManager::getPipelineLayout(const PipelineKey& key) {
     VkPipelineLayout pipelineLayout;
     VkResult result = vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout);
     if (result != VK_SUCCESS) {
+        vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
         throw VulkanError("Failed to create pipeline layout.");
     }
 
-    // Store and return the created layout
+    // Store layout in cache
     pipelineLayouts[key] = pipelineLayout;
     return pipelineLayout;
 }
 // src\ShaderManager.cpp
 // src\ShaderManager.cpp
-
 #include "ShaderManager.h"
+#include <spdlog/spdlog.h>
 
-// Constructor
 ShaderManager::ShaderManager(VkDevice device)
     : device(device) {}
 
-// Destructor: Cleans up all shader modules
 ShaderManager::~ShaderManager() {
     for (auto& [name, shaderModule] : shaderModules) {
         vkDestroyShaderModule(device, shaderModule, nullptr);
+        spdlog::info("Shader module destroyed: {}", name);
     }
 }
 
-// Retrieve or create a shader module based on the shader name and code
 VkShaderModule ShaderManager::getShaderModule(const std::string& shaderName, const std::vector<char>& code) {
     auto it = shaderModules.find(shaderName);
     if (it != shaderModules.end()) {
@@ -365,7 +430,11 @@ VkShaderModule ShaderManager::getShaderModule(const std::string& shaderName, con
         throw VulkanError("Failed to create shader module: " + shaderName);
     }
 
+    // Optional: Verify shader compilation by creating a dummy pipeline
+    // This step is skipped here but recommended during development using validation layers
+
     shaderModules[shaderName] = shaderModule;
+    spdlog::info("Shader module created: {}", shaderName);
     return shaderModule;
 }
 
@@ -509,14 +578,14 @@ void VulkanContext::initVulkan() {
     spdlog::info("Command pool created.");
 
     // 6. Create Descriptor Pool
-    VkDescriptorPoolSize poolSize = {};
-    poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSize.descriptorCount = 1000; // Adjust as needed based on application requirements
+    std::vector<VkDescriptorPoolSize> poolSizes = {
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000 } // Adjust as needed
+    };
 
     VkDescriptorPoolCreateInfo poolCreateInfo = {};
     poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolCreateInfo.poolSizeCount = 1;
-    poolCreateInfo.pPoolSizes = &poolSize;
+    poolCreateInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolCreateInfo.pPoolSizes = poolSizes.data();
     poolCreateInfo.maxSets = 1000; // Adjust as needed
 
     result = vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &vulkan_globals::descriptorPool);
@@ -527,17 +596,17 @@ void VulkanContext::initVulkan() {
     spdlog::info("Descriptor pool created.");
 
     // 7. Create Descriptor Set Layout
-    VkDescriptorSetLayoutBinding layoutBinding = {};
-    layoutBinding.binding = 0;
-    layoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    layoutBinding.descriptorCount = 1;
-    layoutBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    layoutBinding.pImmutableSamplers = nullptr;
+    std::vector<VkDescriptorSetLayoutBinding> layoutBindings = {
+        // Example binding; adjust based on shader requirements
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr} // Output buffer
+    };
 
     VkDescriptorSetLayoutCreateInfo layoutInfo = {};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings = &layoutBinding;
+    layoutInfo.bindingCount = static_cast<uint32_t>(layoutBindings.size());
+    layoutInfo.pBindings = layoutBindings.data();
 
     VkDescriptorSetLayout descriptorSetLayout;
     result = vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
@@ -563,8 +632,7 @@ void VulkanContext::initVulkan() {
     // Initialize DescriptorSetManager with the created layout
     descriptorSetManager = std::make_shared<DescriptorSetManager>(device, vulkan_globals::descriptorPool, descriptorSetLayout);
 
-    spdlog::info("CommandBufferManager created.");
-    spdlog::info("DescriptorSetManager created.");
+    spdlog::info("CommandBufferManager and DescriptorSetManager created.");
 
     // Assign the Vulkan device and compute queue to the global variables
     vulkan_globals::device = device;
@@ -587,8 +655,7 @@ void VulkanContext::cleanupVulkan() {
         memoryManager.reset();
 
         // Destroy Descriptor Set Layout
-        // Note: Assuming DescriptorSetManager does not store the layout; if it does, ensure it's destroyed there
-        // If layout needs to be destroyed here, maintain a member variable for it
+        // Assuming DescriptorSetManager handles its own destruction
 
         vkDestroyDescriptorPool(device, vulkan_globals::descriptorPool, nullptr);
         vkDestroyCommandPool(device, vulkan_globals::commandPool, nullptr);
@@ -715,6 +782,7 @@ void VulkanContext::createLogicalDevice() {
 }
 
 // src\VulkanMemoryManager.cpp
+// src\VulkanMemoryManager.cpp
 #include "VulkanMemoryManager.h"
 
 VulkanMemoryManager::VulkanMemoryManager(VkPhysicalDevice physicalDevice, VkDevice device)
@@ -729,30 +797,36 @@ VulkanMemoryManager::~VulkanMemoryManager() {
 }
 
 VulkanMemoryManager::AllocationInfo VulkanMemoryManager::allocate(VkDeviceSize size, VkMemoryPropertyFlags properties) {
-    VkBuffer dummyBuffer;
+    // Create a temporary buffer to get memory requirements
     VkBufferCreateInfo bufferInfo = {};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = size;
-    bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | 
+                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT | 
+                      VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    VkResult result = vkCreateBuffer(device, &bufferInfo, nullptr, &dummyBuffer);
+    VkBuffer tempBuffer;
+    VkResult result = vkCreateBuffer(device, &bufferInfo, nullptr, &tempBuffer);
     if (result != VK_SUCCESS) {
-        throw VulkanError("Failed to create dummy buffer for memory allocation.");
+        throw VulkanError("Failed to create temporary buffer for memory allocation.");
     }
 
+    // Get memory requirements for the buffer
     VkMemoryRequirements memRequirements;
-    vkGetBufferMemoryRequirements(device, dummyBuffer, &memRequirements);
-    vkDestroyBuffer(device, dummyBuffer, nullptr);
+    vkGetBufferMemoryRequirements(device, tempBuffer, &memRequirements);
+    vkDestroyBuffer(device, tempBuffer, nullptr);
 
+    // Find suitable memory type
     uint32_t memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
     if (memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
         throw VulkanError("Failed to find suitable memory type.");
     }
 
+    // Allocate memory with proper alignment
     VkMemoryAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.allocationSize = memRequirements.size;  // Use the size from requirements
     allocInfo.memoryTypeIndex = memoryTypeIndex;
 
     AllocationInfo allocation = {};
@@ -763,6 +837,8 @@ VulkanMemoryManager::AllocationInfo VulkanMemoryManager::allocate(VkDeviceSize s
 
     allocation.size = memRequirements.size;
     allocation.offset = 0;
+
+    // Store allocation for cleanup
     allocations.push_back(allocation);
 
     return allocation;
@@ -772,6 +848,7 @@ uint32_t VulkanMemoryManager::findMemoryType(uint32_t typeFilter, VkMemoryProper
     VkPhysicalDeviceMemoryProperties memProperties;
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
 
+    // First try to find an exactly matching memory type
     for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
         if ((typeFilter & (1 << i)) && 
             (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
@@ -779,8 +856,18 @@ uint32_t VulkanMemoryManager::findMemoryType(uint32_t typeFilter, VkMemoryProper
         }
     }
 
+    // If exact match not found, try to find a memory type with additional properties
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && 
+            (memProperties.memoryTypes[i].propertyFlags & properties)) {
+            return i;
+        }
+    }
+
     return std::numeric_limits<uint32_t>::max();
 }
+
+// src\VulkanOperations.cpp
 // src\VulkanOperations.cpp
 #include "VulkanOperations.h"
 #include "vulkan_globals.h"
@@ -804,27 +891,69 @@ void executeShader(
     spdlog::debug("Executing shader for operation: {}", static_cast<int>(opType));
 
     VulkanContext* context = vulkan_globals::getContext();
+    if (!context) {
+        throw VulkanError("Vulkan context is null.");
+    }
+
+    // Validate tensors
+    if (!inputA.isValid() || !output.isValid()) {
+        throw VulkanError("Invalid input or output tensor.");
+    }
+    if (inputB && !inputB->isValid()) {
+        throw VulkanError("Invalid inputB tensor.");
+    }
+    if (inputC && !inputC->isValid()) {
+        throw VulkanError("Invalid inputC tensor.");
+    }
+
+    // Create pipeline key
     PipelineKey key = {
         opType,
-        {}, // Input formats
-        {}, // Output formats
-        256, 1, 1 // Workgroup sizes
+        {}, // Input formats can be populated if needed
+        {}, // Output formats can be populated if needed
+        256, 1, 1 // Default workgroup sizes; adjust as per shader requirements
     };
 
+    // Get pipeline and layout
     VkPipeline pipeline = context->getPipelineManager()->getPipeline(key);
     VkPipelineLayout pipelineLayout = context->getPipelineManager()->getPipelineLayout(key);
+    
+    if (pipeline == VK_NULL_HANDLE || pipelineLayout == VK_NULL_HANDLE) {
+        throw VulkanError("Failed to get pipeline or pipeline layout.");
+    }
+
+    // Get command buffer
     VkCommandBuffer commandBuffer = context->getCommandBufferManager()->acquireCommandBuffer();
 
+    // Begin command buffer
     VkCommandBufferBeginInfo beginInfo = {};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
     if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to begin command buffer");
+        throw VulkanError("Failed to begin command buffer.");
     }
 
+    // Memory barrier before execution
+    VkMemoryBarrier preExecutionBarrier = {};
+    preExecutionBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    preExecutionBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    preExecutionBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_HOST_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        1, &preExecutionBarrier,
+        0, nullptr,
+        0, nullptr
+    );
+
+    // Bind pipeline
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 
+    // Update and bind descriptor sets
     auto descriptorManager = context->getDescriptorSetManager();
     VkDescriptorSet descriptorSet = descriptorManager->allocateDescriptorSet();
 
@@ -844,6 +973,7 @@ void executeShader(
         nullptr
     );
 
+    // Push constants if provided
     if (pushConstants) {
         vkCmdPushConstants(
             commandBuffer,
@@ -855,48 +985,62 @@ void executeShader(
         );
     }
 
-    uint32_t globalWorkSizeX = (output.getWidth() + 255) / 256;
-    uint32_t globalWorkSizeY = output.getHeight();
-    uint32_t globalWorkSizeZ = output.getChannels();
+    // Calculate dispatch dimensions based on workgroup size and output tensor dimensions
+    uint32_t globalWorkSizeX = (output.getWidth() + key.workgroupSizeX - 1) / key.workgroupSizeX;
+    uint32_t globalWorkSizeY = (output.getHeight() + key.workgroupSizeY - 1) / key.workgroupSizeY;
+    uint32_t globalWorkSizeZ = (output.getChannels() + key.workgroupSizeZ - 1) / key.workgroupSizeZ;
 
+    // Ensure at least one workgroup is dispatched
+    globalWorkSizeX = std::max(1u, globalWorkSizeX);
+    globalWorkSizeY = std::max(1u, globalWorkSizeY);
+    globalWorkSizeZ = std::max(1u, globalWorkSizeZ);
+
+    // Dispatch compute shader
     vkCmdDispatch(commandBuffer, globalWorkSizeX, globalWorkSizeY, globalWorkSizeZ);
 
-    VkMemoryBarrier memoryBarrier = {};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    // Memory barrier after execution
+    VkMemoryBarrier postExecutionBarrier = {};
+    postExecutionBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    postExecutionBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    postExecutionBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
 
     vkCmdPipelineBarrier(
         commandBuffer,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_PIPELINE_STAGE_HOST_BIT,
         0,
-        1, &memoryBarrier,
+        1, &postExecutionBarrier,
         0, nullptr,
         0, nullptr
     );
 
+    // End command buffer
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to end command buffer");
+        throw VulkanError("Failed to end command buffer.");
     }
 
-    VulkanSync::ScopedGPUWait scopedWait(vulkan_globals::device);
+    // Submit command buffer with fence
+    VulkanSync::ScopedGPUWait scopedWait(deviceRef);
+    
     VkSubmitInfo submitInfo = {};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
 
     if (vkQueueSubmit(vulkan_globals::computeQueue, 1, &submitInfo, scopedWait.get()) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to submit command buffer");
+        throw VulkanError("Failed to submit command buffer.");
     }
 
+    // Wait for completion
     scopedWait.wait();
+
+    // Release command buffer
     context->getCommandBufferManager()->releaseCommandBuffer(commandBuffer);
 }
 
 void executeAdd(const VulkanTensor& inputA, const VulkanTensor& inputB, VulkanTensor& output) {
     if (inputA.getSize() != inputB.getSize() || inputA.getSize() != output.getSize()) {
-        throw std::runtime_error("Tensor size mismatch in Add operation");
+        throw std::runtime_error("Tensor size mismatch in Add operation.");
     }
 
     AddPushConstants pushConstants = { static_cast<uint32_t>(inputA.getSize() / sizeof(float)) };
@@ -908,7 +1052,7 @@ void executeMatMul(const VulkanTensor& a, const VulkanTensor& b, VulkanTensor& c
     if (a.getSize() != M * K * sizeof(float) ||
         b.getSize() != K * N * sizeof(float) ||
         c.getSize() != M * N * sizeof(float)) {
-        throw std::runtime_error("Tensor dimensions mismatch in MatMul operation");
+        throw std::runtime_error("Tensor dimensions mismatch in MatMul operation.");
     }
 
     MatMulPushConstants pushConstants = { M, K, N };
@@ -917,7 +1061,7 @@ void executeMatMul(const VulkanTensor& a, const VulkanTensor& b, VulkanTensor& c
 
 void executeReLU(const VulkanTensor& input, VulkanTensor& output) {
     if (input.getSize() != output.getSize()) {
-        throw std::runtime_error("Tensor size mismatch in ReLU operation");
+        throw std::runtime_error("Tensor size mismatch in ReLU operation.");
     }
 
     ReLUPushConstants pushConstants = { static_cast<uint32_t>(input.getSize() / sizeof(float)) };
@@ -926,7 +1070,7 @@ void executeReLU(const VulkanTensor& input, VulkanTensor& output) {
 
 void executeSigmoid(const VulkanTensor& input, VulkanTensor& output) {
     if (input.getSize() != output.getSize()) {
-        throw std::runtime_error("Tensor size mismatch in Sigmoid operation");
+        throw std::runtime_error("Tensor size mismatch in Sigmoid operation.");
     }
 
     SigmoidPushConstants pushConstants = { static_cast<uint32_t>(input.getSize() / sizeof(float)) };
@@ -935,7 +1079,7 @@ void executeSigmoid(const VulkanTensor& input, VulkanTensor& output) {
 
 void executeSoftmax(const VulkanTensor& input, VulkanTensor& output) {
     if (input.getSize() != output.getSize()) {
-        throw std::runtime_error("Tensor size mismatch in Softmax operation");
+        throw std::runtime_error("Tensor size mismatch in Softmax operation.");
     }
 
     SoftmaxPushConstants pushConstants = { static_cast<uint32_t>(input.getSize() / sizeof(float)) };
@@ -954,15 +1098,15 @@ void executeConv2D(const VulkanTensor& input, const VulkanTensor& kernel,
     if (output.getWidth() != expectedOutputWidth ||
         output.getHeight() != expectedOutputHeight ||
         output.getChannels() != pushConstants.output_channels) {
-        throw std::runtime_error("Output tensor dimensions mismatch in Conv2D operation");
+        throw std::runtime_error("Output tensor dimensions mismatch in Conv2D operation.");
     }
 
     executeShader(VulkanOperationType::Conv2D, input, &kernel, nullptr, output, &pushConstants);
 }
 
-void executeMaxPool(const VulkanTensor& input, VulkanTensor& output,
+void executeMaxPool(const VulkanTensor& input, VulkanTensor& output, 
                     uint32_t width, uint32_t height, uint32_t channels,
-                    uint32_t poolSizeX, uint32_t poolSizeY,
+                    uint32_t poolSizeX, uint32_t poolSizeY, 
                     uint32_t strideX, uint32_t strideY) {
     uint32_t expectedOutputWidth = (width - poolSizeX) / strideX + 1;
     uint32_t expectedOutputHeight = (height - poolSizeY) / strideY + 1;
@@ -970,7 +1114,7 @@ void executeMaxPool(const VulkanTensor& input, VulkanTensor& output,
     if (output.getWidth() != expectedOutputWidth ||
         output.getHeight() != expectedOutputHeight ||
         output.getChannels() != channels) {
-        throw std::runtime_error("Output tensor dimensions mismatch in MaxPool operation");
+        throw std::runtime_error("Output tensor dimensions mismatch in MaxPool operation.");
     }
 
     MaxPoolPushConstants pushConstants = { width, height, channels, 1, poolSizeX, poolSizeY, strideX, strideY };
@@ -978,12 +1122,12 @@ void executeMaxPool(const VulkanTensor& input, VulkanTensor& output,
 }
 
 void executeBatchNorm(const VulkanTensor& input, const VulkanTensor& gamma, 
-                      const VulkanTensor& beta, VulkanTensor& output,
+                      const VulkanTensor& beta, VulkanTensor& output, 
                       uint32_t size, float epsilon) {
     if (input.getSize() != output.getSize() ||
         gamma.getSize() != size * sizeof(float) ||
         beta.getSize() != size * sizeof(float)) {
-        throw std::runtime_error("Tensor dimensions mismatch in BatchNorm operation");
+        throw std::runtime_error("Tensor dimensions mismatch in BatchNorm operation.");
     }
 
     BatchNormPushConstants pushConstants = { size, epsilon };
@@ -991,6 +1135,81 @@ void executeBatchNorm(const VulkanTensor& input, const VulkanTensor& gamma,
 }
 
 } // namespace vulkan_ops
+
+// Explicit template instantiation for PushConstants structs
+namespace vulkan_ops {
+    template void executeShader<AddPushConstants>(
+        VulkanOperationType opType,
+        const VulkanTensor& inputA,
+        const VulkanTensor* inputB,
+        const VulkanTensor* inputC,
+        VulkanTensor& output,
+        const AddPushConstants* pushConstants
+    );
+
+    template void executeShader<MatMulPushConstants>(
+        VulkanOperationType opType,
+        const VulkanTensor& inputA,
+        const VulkanTensor* inputB,
+        const VulkanTensor* inputC,
+        VulkanTensor& output,
+        const MatMulPushConstants* pushConstants
+    );
+
+    template void executeShader<ReLUPushConstants>(
+        VulkanOperationType opType,
+        const VulkanTensor& inputA,
+        const VulkanTensor* inputB,
+        const VulkanTensor* inputC,
+        VulkanTensor& output,
+        const ReLUPushConstants* pushConstants
+    );
+
+    template void executeShader<SigmoidPushConstants>(
+        VulkanOperationType opType,
+        const VulkanTensor& inputA,
+        const VulkanTensor* inputB,
+        const VulkanTensor* inputC,
+        VulkanTensor& output,
+        const SigmoidPushConstants* pushConstants
+    );
+
+    template void executeShader<SoftmaxPushConstants>(
+        VulkanOperationType opType,
+        const VulkanTensor& inputA,
+        const VulkanTensor* inputB,
+        const VulkanTensor* inputC,
+        VulkanTensor& output,
+        const SoftmaxPushConstants* pushConstants
+    );
+
+    template void executeShader<Conv2DPushConstants>(
+        VulkanOperationType opType,
+        const VulkanTensor& inputA,
+        const VulkanTensor* inputB,
+        const VulkanTensor* inputC,
+        VulkanTensor& output,
+        const Conv2DPushConstants* pushConstants
+    );
+
+    template void executeShader<MaxPoolPushConstants>(
+        VulkanOperationType opType,
+        const VulkanTensor& inputA,
+        const VulkanTensor* inputB,
+        const VulkanTensor* inputC,
+        VulkanTensor& output,
+        const MaxPoolPushConstants* pushConstants
+    );
+
+    template void executeShader<BatchNormPushConstants>(
+        VulkanOperationType opType,
+        const VulkanTensor& inputA,
+        const VulkanTensor* inputB,
+        const VulkanTensor* inputC,
+        VulkanTensor& output,
+        const BatchNormPushConstants* pushConstants
+    );
+}
 
 // src\VulkanSync.cpp
 #include "VulkanSync.h"
@@ -1032,9 +1251,341 @@ void ScopedGPUWait::wait() const {
 VkFence ScopedGPUWait::get() const {
     return fence;
 }
-// src\vulkan_backend_bindings.cpp
-// src\vulkan_backend_bindings.cpp
+// src\VulkanTensor.cpp
+#include "VulkanTensor.h"
+#include "VulkanDeviceHelper.h"
+#include <spdlog/spdlog.h>
 
+VulkanTensor::VulkanTensor()
+    : allocation{VK_NULL_HANDLE, 0, 0}
+    , dimensions{0, 0, 0, 0, TensorLayout::Layout::LINEAR}
+    , buffer(VK_NULL_HANDLE)
+    , bufferPoolPtr(nullptr)
+    , deviceRef(vulkan_globals::device) 
+{
+    spdlog::debug("Created empty VulkanTensor");
+}
+
+VulkanTensor::VulkanTensor(
+    VulkanMemoryManager* memoryManager,
+    VulkanBufferPool* bufferPool,
+    VkDeviceSize size,
+    uint32_t w,
+    uint32_t h,
+    uint32_t c,
+    uint32_t n,
+    const void* data,
+    TensorLayout::Layout layout)
+    : dimensions{n, h, w, c, layout}
+    , bufferPoolPtr(bufferPool)
+    , deviceRef(vulkan_globals::device)
+{
+    if (deviceRef == VK_NULL_HANDLE) {
+        throw std::runtime_error("Vulkan device not initialized.");
+    }
+
+    auto context = vulkan_globals::getContext();
+    if (!context) {
+        throw std::runtime_error("Vulkan context is null.");
+    }
+
+    // Get device properties for alignment
+    VkPhysicalDeviceProperties deviceProperties = 
+        VulkanDeviceHelper::getPhysicalDeviceProperties(context->getPhysicalDevice());
+    
+    // Ensure size alignment
+    VkDeviceSize alignment = deviceProperties.limits.minStorageBufferOffsetAlignment;
+    size = (size + alignment - 1) & ~(alignment - 1);
+
+    // Allocate memory
+    try {
+        allocation = memoryManager->allocate(
+            size,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("Failed to allocate memory: ") + e.what());
+    }
+
+    // Create buffer
+    VkBufferCreateInfo bufferInfo = {};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                       VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VkResult result = vkCreateBuffer(deviceRef, &bufferInfo, nullptr, &buffer);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create buffer in VulkanTensor.");
+    }
+
+    result = vkBindBufferMemory(deviceRef, buffer, allocation.memory, allocation.offset);
+    if (result != VK_SUCCESS) {
+        vkDestroyBuffer(deviceRef, buffer, nullptr);
+        throw std::runtime_error("Failed to bind buffer memory in VulkanTensor.");
+    }
+
+    spdlog::debug("Created VulkanTensor with dimensions {}x{}x{}x{}", n, h, w, c);
+
+    if (data) {
+        upload(data);
+    }
+}
+
+VulkanTensor::VulkanTensor(VulkanTensor&& other) noexcept
+    : allocation(other.allocation)
+    , dimensions(other.dimensions)
+    , buffer(other.buffer)
+    , bufferPoolPtr(other.bufferPoolPtr)
+    , deviceRef(other.deviceRef)
+{
+    other.buffer = VK_NULL_HANDLE;
+    other.bufferPoolPtr = nullptr;
+    spdlog::debug("Moved VulkanTensor");
+}
+
+VulkanTensor& VulkanTensor::operator=(VulkanTensor&& other) noexcept {
+    if (this != &other) {
+        cleanup();
+
+        allocation = other.allocation;
+        dimensions = other.dimensions;
+        buffer = other.buffer;
+        bufferPoolPtr = other.bufferPoolPtr;
+        deviceRef = other.deviceRef;
+
+        other.buffer = VK_NULL_HANDLE;
+        other.bufferPoolPtr = nullptr;
+        spdlog::debug("Move assigned VulkanTensor");
+    }
+    return *this;
+}
+
+VulkanTensor::~VulkanTensor() {
+    cleanup();
+    spdlog::debug("Destroyed VulkanTensor");
+}
+
+void VulkanTensor::upload(const void* data) {
+    if (!data) {
+        throw std::runtime_error("Null pointer provided for upload.");
+    }
+
+    VulkanContext* context = vulkan_globals::getContext();
+    if (!context) {
+        throw std::runtime_error("Vulkan context is null.");
+    }
+
+    VkCommandBuffer cmdBuffer = context->getCommandBufferManager()->acquireCommandBuffer();
+    
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    
+    if (vkBeginCommandBuffer(cmdBuffer, &beginInfo) != VK_SUCCESS) {
+        context->getCommandBufferManager()->releaseCommandBuffer(cmdBuffer);
+        throw std::runtime_error("Failed to begin command buffer during upload.");
+    }
+
+    // Add buffer memory barrier for upload
+    VkBufferMemoryBarrier barrier = {};
+    barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    barrier.buffer = buffer;
+    barrier.offset = 0;
+    barrier.size = allocation.size;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+    vkCmdPipelineBarrier(
+        cmdBuffer,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT,
+        0,
+        0, nullptr,
+        1, &barrier,
+        0, nullptr
+    );
+
+    if (vkEndCommandBuffer(cmdBuffer) != VK_SUCCESS) {
+        context->getCommandBufferManager()->releaseCommandBuffer(cmdBuffer);
+        throw std::runtime_error("Failed to end command buffer during upload.");
+    }
+
+    // Submit and wait
+    VulkanSync::ScopedGPUWait scopedWait(deviceRef);
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmdBuffer;
+
+    if (vkQueueSubmit(vulkan_globals::computeQueue, 1, &submitInfo, scopedWait.get()) != VK_SUCCESS) {
+        context->getCommandBufferManager()->releaseCommandBuffer(cmdBuffer);
+        throw std::runtime_error("Failed to submit command buffer during upload.");
+    }
+
+    scopedWait.wait();
+
+    // Map and copy data
+    void* mappedMemory;
+    VkResult result = vkMapMemory(deviceRef, allocation.memory, allocation.offset, allocation.size, 0, &mappedMemory);
+    if (result != VK_SUCCESS) {
+        context->getCommandBufferManager()->releaseCommandBuffer(cmdBuffer);
+        throw std::runtime_error("Failed to map memory for upload.");
+    }
+
+    memcpy(mappedMemory, data, static_cast<size_t>(allocation.size));
+
+    VkMappedMemoryRange memoryRange = {};
+    memoryRange.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    memoryRange.memory = allocation.memory;
+    memoryRange.offset = allocation.offset;
+    memoryRange.size = allocation.size;
+    vkFlushMappedMemoryRanges(deviceRef, 1, &memoryRange);
+
+    vkUnmapMemory(deviceRef, allocation.memory);
+    context->getCommandBufferManager()->releaseCommandBuffer(cmdBuffer);
+
+    spdlog::debug("Uploaded data to VulkanTensor");
+}
+
+void VulkanTensor::download(void* data) const {
+    if (!data) {
+        throw std::runtime_error("Null pointer provided for download.");
+    }
+
+    VulkanContext* context = vulkan_globals::getContext();
+    if (!context) {
+        throw std::runtime_error("Vulkan context is null.");
+    }
+
+    VkCommandBuffer cmdBuffer = context->getCommandBufferManager()->acquireCommandBuffer();
+    
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    
+    if (vkBeginCommandBuffer(cmdBuffer, &beginInfo) != VK_SUCCESS) {
+        context->getCommandBufferManager()->releaseCommandBuffer(cmdBuffer);
+        throw std::runtime_error("Failed to begin command buffer during download.");
+    }
+
+    // Add buffer memory barrier for download
+    VkBufferMemoryBarrier barrier = {};
+    barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    barrier.buffer = buffer;
+    barrier.offset = 0;
+    barrier.size = allocation.size;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+    vkCmdPipelineBarrier(
+        cmdBuffer,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT,
+        0,
+        0, nullptr,
+        1, &barrier,
+        0, nullptr
+    );
+
+    if (vkEndCommandBuffer(cmdBuffer) != VK_SUCCESS) {
+        context->getCommandBufferManager()->releaseCommandBuffer(cmdBuffer);
+        throw std::runtime_error("Failed to end command buffer during download.");
+    }
+
+    // Submit and wait
+    VulkanSync::ScopedGPUWait scopedWait(deviceRef);
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmdBuffer;
+
+    if (vkQueueSubmit(vulkan_globals::computeQueue, 1, &submitInfo, scopedWait.get()) != VK_SUCCESS) {
+        context->getCommandBufferManager()->releaseCommandBuffer(cmdBuffer);
+        throw std::runtime_error("Failed to submit command buffer during download.");
+    }
+
+    scopedWait.wait();
+
+    // Map and copy data
+    void* mappedMemory;
+    VkResult result = vkMapMemory(deviceRef, allocation.memory, allocation.offset, allocation.size, 0, &mappedMemory);
+    if (result != VK_SUCCESS) {
+        context->getCommandBufferManager()->releaseCommandBuffer(cmdBuffer);
+        throw std::runtime_error("Failed to map memory for download.");
+    }
+
+    VkMappedMemoryRange memoryRange = {};
+    memoryRange.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    memoryRange.memory = allocation.memory;
+    memoryRange.offset = allocation.offset;
+    memoryRange.size = allocation.size;
+    vkInvalidateMappedMemoryRanges(deviceRef, 1, &memoryRange);
+
+    memcpy(data, mappedMemory, static_cast<size_t>(allocation.size));
+    vkUnmapMemory(deviceRef, allocation.memory);
+
+    context->getCommandBufferManager()->releaseCommandBuffer(cmdBuffer);
+    spdlog::debug("Downloaded data from VulkanTensor");
+}
+
+uint32_t VulkanTensor::getN() const { return dimensions.n; }
+uint32_t VulkanTensor::getC() const { return dimensions.c; }
+uint32_t VulkanTensor::getH() const { return dimensions.h; }
+uint32_t VulkanTensor::getW() const { return dimensions.w; }
+uint32_t VulkanTensor::getWidth() const { return dimensions.w; }
+uint32_t VulkanTensor::getHeight() const { return dimensions.h; }
+uint32_t VulkanTensor::getChannels() const { return dimensions.c; }
+VkDeviceSize VulkanTensor::getSize() const { return allocation.size; }
+VkBuffer VulkanTensor::getBuffer() const { return buffer; }
+
+TensorLayout::Layout VulkanTensor::getLayout() const { return dimensions.layout; }
+void VulkanTensor::setLayout(TensorLayout::Layout newLayout) { dimensions.layout = newLayout; }
+
+bool VulkanTensor::isValid() const {
+    return buffer != VK_NULL_HANDLE && allocation.memory != VK_NULL_HANDLE;
+}
+
+std::string VulkanTensor::getDimensionsString() const {
+    return "(" + std::to_string(dimensions.n) + ", " +
+           std::to_string(dimensions.c) + ", " +
+           std::to_string(dimensions.h) + ", " +
+           std::to_string(dimensions.w) + ")";
+}
+
+bool VulkanTensor::verifyDimensions(VkDeviceSize expectedSize) const {
+    return allocation.size == expectedSize &&
+           (dimensions.w * dimensions.h * dimensions.c * dimensions.n * sizeof(float)) == expectedSize;
+}
+
+void VulkanTensor::debugPrint() const {
+    std::vector<float> data(allocation.size / sizeof(float));
+    download(data.data());
+    std::cout << "Tensor data (first 10 elements): ";
+    for (size_t i = 0; i < std::min<size_t>(10, data.size()); ++i) {
+        std::cout << data[i] << " ";
+    }
+    std::cout << std::endl;
+}
+
+void VulkanTensor::cleanup() {
+    if (buffer != VK_NULL_HANDLE) {
+        if (bufferPoolPtr) {
+            bufferPoolPtr->releaseBuffer(buffer);
+        }
+        vkDestroyBuffer(deviceRef, buffer, nullptr);
+        buffer = VK_NULL_HANDLE;
+        spdlog::debug("Cleaned up VulkanTensor resources");
+    }
+}
+// src\vulkan_backend_bindings.cpp
+// src\vulkan_backend_bindings.cpp
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -1188,7 +1739,6 @@ PYBIND11_MODULE(vulkan_backend, m) {
                                        static_cast<size_t>(self.getC()) *
                                        static_cast<size_t>(self.getH()) *
                                        static_cast<size_t>(self.getW());
-
                 if (input.size() != expected_size) {
                     throw std::runtime_error("Input array size does not match VulkanTensor size.");
                 }
@@ -1208,7 +1758,8 @@ PYBIND11_MODULE(vulkan_backend, m) {
                      static_cast<int64_t>(self.getW()) };
         }, "Get the shape of the tensor.")
         .def("get_layout", &VulkanTensor::getLayout, "Get the tensor layout.")
-        .def("set_layout", &VulkanTensor::setLayout, "Set the tensor layout.");
+        .def("set_layout", &VulkanTensor::setLayout, "Set the tensor layout.")
+        .def("debug_print", &VulkanTensor::debugPrint, "Print first few elements of the tensor for debugging.");
 
     // -----------------------------
     // Factory Function to Create VulkanTensor
@@ -1679,7 +2230,7 @@ PYBIND11_MODULE(vulkan_backend, m) {
     // -----------------------------
     m.def("vulkan_maxpool", [](py::array_t<float> input, py::array_t<float> output,
                               uint32_t width, uint32_t height, uint32_t channels,
-                              uint32_t poolSizeX, uint32_t poolSizeY,
+                              uint32_t poolSizeX, uint32_t poolSizeY, 
                               uint32_t strideX, uint32_t strideY) {
         try {
             // Ensure Vulkan is initialized

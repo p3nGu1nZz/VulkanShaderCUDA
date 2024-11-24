@@ -1,19 +1,17 @@
 // src\ShaderManager.cpp
-
 #include "ShaderManager.h"
+#include <spdlog/spdlog.h>
 
-// Constructor
 ShaderManager::ShaderManager(VkDevice device)
     : device(device) {}
 
-// Destructor: Cleans up all shader modules
 ShaderManager::~ShaderManager() {
     for (auto& [name, shaderModule] : shaderModules) {
         vkDestroyShaderModule(device, shaderModule, nullptr);
+        spdlog::info("Shader module destroyed: {}", name);
     }
 }
 
-// Retrieve or create a shader module based on the shader name and code
 VkShaderModule ShaderManager::getShaderModule(const std::string& shaderName, const std::vector<char>& code) {
     auto it = shaderModules.find(shaderName);
     if (it != shaderModules.end()) {
@@ -36,6 +34,10 @@ VkShaderModule ShaderManager::getShaderModule(const std::string& shaderName, con
         throw VulkanError("Failed to create shader module: " + shaderName);
     }
 
+    // Optional: Verify shader compilation by creating a dummy pipeline
+    // This step is skipped here but recommended during development using validation layers
+
     shaderModules[shaderName] = shaderModule;
+    spdlog::info("Shader module created: {}", shaderName);
     return shaderModule;
 }

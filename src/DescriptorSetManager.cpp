@@ -1,3 +1,4 @@
+// src\DescriptorSetManager.cpp
 #include "DescriptorSetManager.h"
 #include "spdlog/spdlog.h"
 
@@ -26,38 +27,57 @@ VkDescriptorSet DescriptorSetManager::allocateDescriptorSet() {
 }
 
 void DescriptorSetManager::updateDescriptorSet(VkDescriptorSet descriptorSet, const std::vector<VkBuffer>& inputBuffers, VkBuffer outputBuffer) {
-    std::vector<VkDescriptorBufferInfo> bufferInfos(inputBuffers.size());
+    std::vector<VkDescriptorBufferInfo> bufferInfos;
+    std::vector<VkWriteDescriptorSet> descriptorWrites;
 
+    // Reserve space to avoid reallocations
+    bufferInfos.reserve(inputBuffers.size() + 1);
+    descriptorWrites.reserve(inputBuffers.size() + 1);
+
+    // Process input buffers
     for (size_t i = 0; i < inputBuffers.size(); i++) {
-        bufferInfos[i].buffer = inputBuffers[i];
-        bufferInfos[i].offset = 0;
-        bufferInfos[i].range = VK_WHOLE_SIZE;
+        VkDescriptorBufferInfo bufferInfo = {};
+        bufferInfo.buffer = inputBuffers[i];
+        bufferInfo.offset = 0;
+        bufferInfo.range = VK_WHOLE_SIZE;
+        bufferInfos.push_back(bufferInfo);
+
+        VkWriteDescriptorSet writeDescriptor = {};
+        writeDescriptor.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writeDescriptor.dstSet = descriptorSet;
+        writeDescriptor.dstBinding = static_cast<uint32_t>(i); // Binding index for input buffers
+        writeDescriptor.dstArrayElement = 0;
+        writeDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writeDescriptor.descriptorCount = 1;
+        writeDescriptor.pBufferInfo = &bufferInfos.back();
+        descriptorWrites.push_back(writeDescriptor);
     }
 
-    VkDescriptorBufferInfo outputBufferInfo = {};
-    outputBufferInfo.buffer = outputBuffer;
-    outputBufferInfo.offset = 0;
-    outputBufferInfo.range = VK_WHOLE_SIZE;
+    // Add output buffer
+    if (outputBuffer != VK_NULL_HANDLE) {
+        VkDescriptorBufferInfo outputBufferInfo = {};
+        outputBufferInfo.buffer = outputBuffer;
+        outputBufferInfo.offset = 0;
+        outputBufferInfo.range = VK_WHOLE_SIZE;
+        bufferInfos.push_back(outputBufferInfo);
 
-    std::vector<VkWriteDescriptorSet> descriptorWrites(bufferInfos.size() + 1);
-
-    for (size_t i = 0; i < bufferInfos.size(); i++) {
-        descriptorWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrites[i].dstSet = descriptorSet;
-        descriptorWrites[i].dstBinding = static_cast<uint32_t>(i);
-        descriptorWrites[i].dstArrayElement = 0;
-        descriptorWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        descriptorWrites[i].descriptorCount = 1;
-        descriptorWrites[i].pBufferInfo = &bufferInfos[i];
+        VkWriteDescriptorSet writeDescriptor = {};
+        writeDescriptor.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writeDescriptor.dstSet = descriptorSet;
+        writeDescriptor.dstBinding = static_cast<uint32_t>(inputBuffers.size()); // Binding index for output buffer
+        writeDescriptor.dstArrayElement = 0;
+        writeDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writeDescriptor.descriptorCount = 1;
+        writeDescriptor.pBufferInfo = &bufferInfos.back();
+        descriptorWrites.push_back(writeDescriptor);
     }
 
-    descriptorWrites.back().sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    descriptorWrites.back().dstSet = descriptorSet;
-    descriptorWrites.back().dstBinding = static_cast<uint32_t>(bufferInfos.size());
-    descriptorWrites.back().dstArrayElement = 0;
-    descriptorWrites.back().descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    descriptorWrites.back().descriptorCount = 1;
-    descriptorWrites.back().pBufferInfo = &outputBufferInfo;
-
-    vkUpdateDescriptorSets(device, static_cast<uint32_t>(descriptorWrites.size()), descriptorWrites.data(), 0, nullptr);
+    // Update all descriptors at once
+    vkUpdateDescriptorSets(
+        device,
+        static_cast<uint32_t>(descriptorWrites.size()),
+        descriptorWrites.data(),
+        0,
+        nullptr
+    );
 }

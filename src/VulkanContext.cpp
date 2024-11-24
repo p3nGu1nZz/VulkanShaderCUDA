@@ -90,14 +90,14 @@ void VulkanContext::initVulkan() {
     spdlog::info("Command pool created.");
 
     // 6. Create Descriptor Pool
-    VkDescriptorPoolSize poolSize = {};
-    poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSize.descriptorCount = 1000; // Adjust as needed based on application requirements
+    std::vector<VkDescriptorPoolSize> poolSizes = {
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1000 } // Adjust as needed
+    };
 
     VkDescriptorPoolCreateInfo poolCreateInfo = {};
     poolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolCreateInfo.poolSizeCount = 1;
-    poolCreateInfo.pPoolSizes = &poolSize;
+    poolCreateInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolCreateInfo.pPoolSizes = poolSizes.data();
     poolCreateInfo.maxSets = 1000; // Adjust as needed
 
     result = vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &vulkan_globals::descriptorPool);
@@ -108,17 +108,17 @@ void VulkanContext::initVulkan() {
     spdlog::info("Descriptor pool created.");
 
     // 7. Create Descriptor Set Layout
-    VkDescriptorSetLayoutBinding layoutBinding = {};
-    layoutBinding.binding = 0;
-    layoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    layoutBinding.descriptorCount = 1;
-    layoutBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    layoutBinding.pImmutableSamplers = nullptr;
+    std::vector<VkDescriptorSetLayoutBinding> layoutBindings = {
+        // Example binding; adjust based on shader requirements
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr} // Output buffer
+    };
 
     VkDescriptorSetLayoutCreateInfo layoutInfo = {};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings = &layoutBinding;
+    layoutInfo.bindingCount = static_cast<uint32_t>(layoutBindings.size());
+    layoutInfo.pBindings = layoutBindings.data();
 
     VkDescriptorSetLayout descriptorSetLayout;
     result = vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
@@ -144,8 +144,7 @@ void VulkanContext::initVulkan() {
     // Initialize DescriptorSetManager with the created layout
     descriptorSetManager = std::make_shared<DescriptorSetManager>(device, vulkan_globals::descriptorPool, descriptorSetLayout);
 
-    spdlog::info("CommandBufferManager created.");
-    spdlog::info("DescriptorSetManager created.");
+    spdlog::info("CommandBufferManager and DescriptorSetManager created.");
 
     // Assign the Vulkan device and compute queue to the global variables
     vulkan_globals::device = device;
@@ -168,8 +167,7 @@ void VulkanContext::cleanupVulkan() {
         memoryManager.reset();
 
         // Destroy Descriptor Set Layout
-        // Note: Assuming DescriptorSetManager does not store the layout; if it does, ensure it's destroyed there
-        // If layout needs to be destroyed here, maintain a member variable for it
+        // Assuming DescriptorSetManager handles its own destruction
 
         vkDestroyDescriptorPool(device, vulkan_globals::descriptorPool, nullptr);
         vkDestroyCommandPool(device, vulkan_globals::commandPool, nullptr);
